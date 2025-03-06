@@ -9,7 +9,6 @@ from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import AgentExecutor, create_react_agent
 from langchain.tools import Tool
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, trim_messages
 from langgraph.checkpoint.memory import MemorySaver
@@ -34,7 +33,7 @@ dotenv_path = os.path.join(os.path.dirname(__file__), 'db', '.env')
 load_dotenv(dotenv_path)
 
 # Credenciales para usar VERTEX_AI
-credentials_path = r"C:/Users/Dante/Desktop/rag_docente_sin_UI/db/gen-lang-client-0115469242-239dc466873d.json"
+credentials_path = r"C:/Users/Dante/Desktop/rag_docente/db/gen-lang-client-0115469242-239dc466873d.json"
 if not os.path.exists(credentials_path):
     raise FileNotFoundError(
         f"No se encontró el archivo de credenciales en: {credentials_path}")
@@ -311,6 +310,29 @@ def direct_answer_generator(llm, query, documents, source_documents=None, conver
         return f"Lo siento, hubo un error al procesar la respuesta. ¿Podrías reformular tu pregunta? Error: {str(e)}"
 
 
+def create_filtered_retriever(vectorstore, filter_text, k=2):
+    """
+    Crea un retriever que filtra los resultados después de la búsqueda
+    """
+    base_retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": k * 2}  # Duplicamos k para compensar el filtrado posterior
+    )
+    
+    def filtered_search(query):
+        docs = base_retriever.invoke(query)
+        # Filtrar documentos que contengan el texto especificado en su source
+        filtered_docs = [
+            doc for doc in docs 
+            if hasattr(doc, 'metadata') 
+            and 'source' in doc.metadata 
+            and filter_text.lower() in doc.metadata['source'].lower()
+        ]
+        return filtered_docs[:k]  # Devolver solo los k primeros documentos
+    
+    return filtered_search
+
+
 def create_enhanced_retriever_tool(vectorstore, llm, conversation_history=None,
                                tool_name="enhanced_pdf_retriever",
                                tool_description="Busca información específica en documentos curriculares chilenos para ayudar a crear planificaciones educativas."):
@@ -476,7 +498,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         legal_query = f"requisitos normativos para planificaciones educativas en {nivel} {asignatura}"
         legal_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                    "k": 2, "filter": {"source": {"$contains": "leyes"}}})
-        legal_docs = legal_retriever.invoke(legal_query)
+        legal_docs = legal_retriever.get_relevant_documents(legal_query)
         if legal_docs:
             results.append("MARCO NORMATIVO:")
             for doc in legal_docs:
@@ -486,7 +508,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         orientation_query = f"orientaciones para planificación en {nivel} {asignatura}"
         orientation_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                          "k": 2, "filter": {"source": {"$contains": "orientaciones"}}})
-        orientation_docs = orientation_retriever.invoke(
+        orientation_docs = orientation_retriever.get_relevant_documents(
             orientation_query)
         if orientation_docs:
             results.append("\nORIENTACIONES:")
@@ -497,7 +519,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         curriculum_query = f"objetivos de aprendizaje {nivel} {asignatura}"
         curriculum_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                         "k": 3, "filter": {"source": {"$contains": "bases curriculares"}}})
-        curriculum_docs = curriculum_retriever.invoke(
+        curriculum_docs = curriculum_retriever.get_relevant_documents(
             curriculum_query)
         if curriculum_docs:
             results.append("\nBASES CURRICULARES:")
@@ -536,109 +558,6 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         func=strategic_search_with_answer,
         description=tool_description
     )
-
-
-def create_agent(llm, tools):
-    """
-    Creates a LangChain agent with an improved prompt that emphasizes
-    contextual understanding and helpfulness over precision.
-    """
-    # Obtener nombres de herramientas
-    tool_names = ", ".join([tool.name for tool in tools])
-
-    # Define the prompt with emphasis on being helpful with available information
-    system_message = f"""Eres un asistente especializado para docentes chilenos que ayuda en la creación de tres tipos específicos de contenido educativo:
-
-    1. PLANIFICACIONES:
-       - Anuales, semestrales o mensuales
-       - Incluyen: objetivo general, objetivos específicos (mínimo 5), contenidos y habilidades asociadas (mínimo 5)
-       - Adaptadas al nivel educativo solicitado
-
-    2. EVALUACIONES:
-       - 10 preguntas total:
-         * 8 preguntas de selección múltiple
-         * 2 preguntas de desarrollo
-       - Incluye respuestas guía para todas las preguntas
-       - Adaptadas al nivel y asignatura
-
-    3. GUÍAS DE ESTUDIO:
-       - Contenido específico por asignatura y tema
-       - Formato de repaso estructurado y sencillo
-       - Incluye ejemplos y ejercicios prácticos
-
-    PROCESO DE RESPUESTA:
-    1. INTERPRETAR la solicitud del usuario para identificar qué tipo de contenido necesita
-    2. GENERAR SOLO el tipo de contenido solicitado (no generar los otros tipos)
-    3. Si no hay información específica en el contexto, OFRECER una alternativa aclarando que no está basada en los documentos disponibles
-
-
-    Aspectos a considerar, estos son los niveles educativos que tiene el sistema nacional chileno:
-    - Niveles: Sala Cuna (0-2 años), Nivel Medio (2-4 años), Transición (4-6 años)
-    - Educación Básica (1° a 6° Básico)
-    - Educación Media (7° básico a 2° medio)
-    - Educación Media diferenciada (3° a 4° medio. Científico-Humanista, Técnico Profesional, Artística)
-    Tienes acceso a las siguientes herramientas:
-    {tool_names}
-
-    ORGANIZACIÓN DE CONTENIDOS:
-    - LEYES: Marco normativo que define los límites y requisitos de planificaciones educativas
-    - ORIENTACIONES: Guías generales sobre cómo estructurar planificaciones y evaluaciones
-    - BASES CURRICULARES: Documentos oficiales con objetivos de aprendizaje por nivel y asignatura
-    - PROPUESTAS: Ejemplos de planificaciones que puedes adaptar (prioriza usar estas antes de crear desde cero)
-    - ACTIVIDADES SUGERIDAS: Actividades específicas que complementan las planificaciones
-
-    INSTRUCCIONES IMPORTANTES:
-    1. SIEMPRE identifica primero qué tipo de contenido necesita el usuario
-    2. GENERA ÚNICAMENTE el tipo de contenido solicitado
-    3. MANTÉN el formato específico para cada tipo de contenido
-    4. Si no encuentras información específica, OFRECE alternativas aclarando que no están basadas en el contexto
-    5. Sé conversacional y natural en tus respuestas
-
-    Para usar una herramienta, utiliza el siguiente formato:
-    Thought: Primero, necesito pensar qué hacer
-    Action: la acción a realizar, debe ser una de [{tool_names}]
-    Action Input: la entrada para la acción
-    Observation: el resultado de la acción
-    ... (este proceso puede repetirse si es necesario)
-    Thought: Ahora conozco la respuesta final
-    Final Answer: la respuesta final a la pregunta original
-
-    Utiliza siempre el formato anterior, comenzando con un Thought e incluyendo los pasos Action/Action Input necesarios antes de proporcionar una Final Answer.
-
-    Question: {input}
-    """
-
-    prompt = PromptTemplate(
-        template=system_message + "\n\nQuestion: {input}",
-        input_variables=["input", "agent_scratchpad"]
-    )
-
-    # Create the agent
-    agent = create_react_agent(llm, tools, prompt)
-
-    # Create the agent executor with improved settings
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=2,  # Limit to prevent loops
-        early_stopping_method="force",  # Force stop after max iterations
-        return_intermediate_steps=True  # Return the steps for tracing
-    )
-
-    return agent_executor
-
-# Define the state schema as a TypedDict
-
-
-class AgentState(TypedDict):
-    messages: List[Any]  # Store conversation messages
-    next_steps: List[Dict[str, str]]  # Store next actions to take
-    tool_results: Dict[str, str]  # Store results from tools
-    current_tool: Optional[str]  # Track which tool is being used
-    conversation_summary: Optional[str]  # Store conversation summary
-    thread_id: Optional[str]  # Agregamos thread_id al estado
 
 
 def create_langgraph_agent(llm, tools):
@@ -784,32 +703,59 @@ Iniciada el: {time.strftime("%d/%m/%Y %H:%M:%S")}
 
 def create_planning_agent(llm, vectorstore):
     """
-    Crea un agente especializado en planificaciones educativas.
-    Verifica que tenga asignatura y nivel antes de generar contenido.
+    Crea un agente especializado en planificaciones educativas que considera:
+    1. El contexto mensual chileno (fechas importantes, eventos, clima, etc.)
+    2. Progresión ascendente del aprendizaje durante el año
+    3. Adaptación al nivel y asignatura específicos
     """
-    system_prompt = """Eres un agente especializado en CREAR PLANIFICACIONES EDUCATIVAS para el sistema chileno.
+    system_prompt = """Eres un experto en planificación educativa chilena. Tu tarea es crear planificaciones que:
 
-    DEBES verificar que tengas estos dos datos esenciales:
-    1. ASIGNATURA (Lenguaje, Matemáticas, Historia, Ciencias, etc.)
-    2. NIVEL (Específico: 1° básico, 7° básico, 2° medio, etc.)
+    1. CONSIDEREN EL CONTEXTO CHILENO MENSUAL:
+       MARZO: Inicio año escolar, adaptación, diagnóstico
+       ABRIL: Fiestas patrias otoñales
+       MAYO: Día del estudiante, Glorias Navales
+       JUNIO: Pueblos originarios, Día del padre, inicio invierno
+       JULIO: Vacaciones de invierno, evaluación primer semestre
+       AGOSTO: Mes de la solidaridad, retorno a clases
+       SEPTIEMBRE: Fiestas patrias, folclore
+       OCTUBRE: Encuentro de dos mundos, primavera
+       NOVIEMBRE: Preparación cierre año escolar
+       DICIEMBRE: Evaluaciones finales, actividades cierre
 
-    Si falta alguno de estos datos, SOLICITA específicamente la información faltante.
+    2. ASEGUREN PROGRESIÓN DEL APRENDIZAJE:
+       - Partir de conocimientos básicos/diagnóstico
+       - Avanzar gradualmente en complejidad
+       - Conectar contenidos entre meses
+       - Reforzar aprendizajes previos
+       - Introducir nuevos desafíos progresivamente
 
-    Una vez que tengas ambos datos, genera una planificación completa con:
-    - Objetivo general (extraído de las bases curriculares)
-    - Objetivos específicos (mínimo 5, basados en el currículum)
-    - Contenidos/habilidades (mínimo 5, alineados con bases curriculares)
-    - Actividades (mínimo 3, detalladas y acordes al nivel)
-    - Evaluación sugerida (métodos para verificar aprendizaje)
+    3. ESTRUCTURA DE LA PLANIFICACIÓN:
+       - Objetivo general (del currículum nacional)
+       - Objetivos específicos (mínimo 5)
+       - Contenidos y habilidades (mínimo 5)
+       - Actividades sugeridas (mínimo 3)
+       - Evaluación formativa
+       - Recursos necesarios
+       - Adecuaciones según contexto mensual
 
-    Formatea tu respuesta de manera clara y estructurada. Cita las fuentes curriculares específicas.
+    4. CONSIDERACIONES:
+       - Alinear con bases curriculares vigentes
+       - Adaptar al nivel y asignatura
+       - Incluir habilidades transversales
+       - Considerar diversidad de estudiantes
+       - Incorporar elementos culturales chilenos
+
+    IMPORTANTE: 
+    - Asegura que cada mes construya sobre el anterior
+    - Incluye actividades contextualizadas al mes
+    - Considera el clima y estación del año
+    - Incorpora eventos relevantes del calendario escolar
     """
 
     def planning_agent_executor(query, asignatura=None, nivel=None):
         # Verificar información faltante
         faltante = []
         if not asignatura:
-            # Intentar extraer asignatura de la consulta
             extract_prompt = [
                 SystemMessage(
                     content="Extrae la asignatura mencionada en esta solicitud. Si no hay ninguna, responde 'No especificada'."),
@@ -823,7 +769,6 @@ def create_planning_agent(llm, vectorstore):
                 asignatura = asignatura_result.content.strip()
 
         if not nivel:
-            # Intentar extraer nivel de la consulta
             extract_prompt = [
                 SystemMessage(
                     content="Extrae el nivel educativo mencionado en esta solicitud (ej: 5° básico, 2° medio). Si no hay ninguno, responde 'No especificado'."),
@@ -853,23 +798,33 @@ def create_planning_agent(llm, vectorstore):
             search_kwargs={"k": 5, "fetch_k": 10}
         )
 
-        retrieved_docs = retriever.invoke(enhanced_query)
+        retrieved_docs = retriever.get_relevant_documents(enhanced_query)
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
         # Generar la planificación
-        prompt = [
+        planning_prompt = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"""
-            Solicitud: {query}
-            Asignatura: {asignatura}
-            Nivel: {nivel}
+            SOLICITUD: {query}
+            ASIGNATURA: {asignatura}
+            NIVEL: {nivel}
+            MES ESPECÍFICO: {mes if mes else "No especificado - considerar progresión anual"}
 
-            Información curricular relevante:
-            {context}
+            CONTEXTO CURRICULAR:
+            {curriculum_context}
+
+            INFORMACIÓN DE PROGRESIÓN:
+            {progression_context}
+
+            Por favor, genera una planificación que:
+            1. {f'Se enfoque en el mes de {mes}' if mes else 'Muestre la progresión anual'}
+            2. Considere el contexto chileno y eventos relevantes
+            3. Asegure una progresión clara del aprendizaje
+            4. Se adapte al nivel y asignatura específicos
             """)
         ]
 
-        response = rate_limited_llm_call(llm.invoke, prompt)
+        response = rate_limited_llm_call(llm.invoke, planning_prompt)
         return response.content, False, {"asignatura": asignatura, "nivel": nivel}
 
     return planning_agent_executor
@@ -877,33 +832,65 @@ def create_planning_agent(llm, vectorstore):
 
 def create_evaluation_agent(llm, vectorstore):
     """
-    Crea un agente especializado en evaluaciones educativas.
-    Verifica que tenga asignatura y nivel antes de generar contenido.
+    Crea un agente especializado en evaluaciones educativas que:
+    1. Prioriza los criterios especificados por el usuario
+    2. Usa configuración por defecto cuando no se especifican criterios
+    3. Se adapta al nivel y asignatura
     """
-    system_prompt = """Eres un agente especializado en CREAR EVALUACIONES EDUCATIVAS para el sistema chileno.
+    system_prompt = """Eres un experto en evaluación educativa chilena. Tu tarea es crear evaluaciones que:
 
-    DEBES verificar que tengas estos dos datos esenciales:
-    1. ASIGNATURA (Lenguaje, Matemáticas, Historia, Ciencias, etc.)
-    2. NIVEL (Específico: 1° básico, 7° básico, 2° medio, etc.)
+    1. PRIORICEN LOS CRITERIOS DEL USUARIO:
+       - Número de preguntas especificado
+       - Tipos de preguntas solicitados
+       - Temas o contenidos específicos
+       - Formato de evaluación requerido
 
-    Si falta alguno de estos datos, SOLICITA específicamente la información faltante.
+    2. CONFIGURACIÓN POR DEFECTO (si no se especifica):
+       - 8 preguntas de selección múltiple
+       - 2 preguntas de desarrollo
+       - Distribución de dificultad:
+         * 40% nivel básico
+         * 40% nivel intermedio
+         * 20% nivel avanzado
 
-    Una vez que tengas ambos datos, genera una evaluación completa con:
-    - 8 preguntas de selección múltiple con 4 opciones cada una
-    - 2 preguntas de desarrollo que evalúen habilidades superiores
-    - Respuestas correctas y rúbricas de evaluación para las preguntas de desarrollo
+    3. ESTRUCTURA DE LA EVALUACIÓN:
+       SELECCIÓN MÚLTIPLE:
+       - Enunciado claro y preciso
+       - 4 alternativas por pregunta
+       - Solo una respuesta correcta
+       - Distractores plausibles
+       
+       DESARROLLO:
+       - Instrucciones detalladas
+       - Espacio adecuado para respuesta
+       - Rúbrica de evaluación
+       - Puntajes asignados
 
-    Las preguntas deben estar alineadas con los objetivos de aprendizaje del currículum nacional
-    para la asignatura y nivel especificados.
+    4. ELEMENTOS ADICIONALES:
+       - Encabezado completo
+       - Instrucciones generales
+       - Tiempo sugerido
+       - Puntaje total y de aprobación
+       - Tabla de especificaciones
 
-    Formatea tu respuesta con números claros para cada pregunta y letras para las alternativas.
+    5. CONSIDERACIONES:
+       - Alinear con objetivos de aprendizaje
+       - Adaptar lenguaje al nivel
+       - Incluir contextos significativos
+       - Evaluar diferentes habilidades
+       - Permitir demostrar comprensión
+
+    IMPORTANTE: 
+    - PRIORIZAR SIEMPRE los criterios específicos del usuario
+    - Usar configuración por defecto solo cuando no hay especificaciones
+    - Incluir retroalimentación para cada pregunta
+    - Proporcionar rúbricas detalladas
     """
 
     def evaluation_agent_executor(query, asignatura=None, nivel=None):
         # Verificar información faltante
         faltante = []
         if not asignatura:
-            # Intentar extraer asignatura de la consulta
             extract_prompt = [
                 SystemMessage(
                     content="Extrae la asignatura mencionada en esta solicitud. Si no hay ninguna, responde 'No especificada'."),
@@ -917,7 +904,6 @@ def create_evaluation_agent(llm, vectorstore):
                 asignatura = asignatura_result.content.strip()
 
         if not nivel:
-            # Intentar extraer nivel de la consulta
             extract_prompt = [
                 SystemMessage(
                     content="Extrae el nivel educativo mencionado en esta solicitud (ej: 5° básico, 2° medio). Si no hay ninguno, responde 'No especificado'."),
@@ -947,23 +933,35 @@ def create_evaluation_agent(llm, vectorstore):
             search_kwargs={"k": 5, "fetch_k": 10}
         )
 
-        retrieved_docs = retriever.invoke(enhanced_query)
+        retrieved_docs = retriever.get_relevant_documents(enhanced_query)
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
         # Generar la evaluación
-        prompt = [
+        evaluation_prompt = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"""
-            Solicitud: {query}
-            Asignatura: {asignatura}
-            Nivel: {nivel}
+            SOLICITUD: {query}
+            ASIGNATURA: {asignatura}
+            NIVEL: {nivel}
 
-            Objetivos de aprendizaje y contenidos relevantes:
-            {context}
+            CRITERIOS ESPECÍFICOS:
+            - Preguntas selección múltiple: {criterios["num_seleccion_multiple"] if criterios["num_seleccion_multiple"] else "usar configuración por defecto"}
+            - Preguntas desarrollo: {criterios["num_desarrollo"] if criterios["num_desarrollo"] else "usar configuración por defecto"}
+            - Contenidos específicos: {", ".join(criterios["contenidos_especificos"]) if criterios["contenidos_especificos"] else "no especificados"}
+            - Otros criterios: {", ".join(criterios["otros_criterios"]) if criterios["otros_criterios"] else "no especificados"}
+
+            CONTEXTO CURRICULAR:
+            {curriculum_context}
+
+            Por favor, genera una evaluación que:
+            1. Priorice los criterios específicos mencionados arriba
+            2. Use la configuración por defecto para lo no especificado
+            3. Se alinee con el currículum nacional
+            4. Sea apropiada para el nivel y asignatura
             """)
         ]
 
-        response = rate_limited_llm_call(llm.invoke, prompt)
+        response = rate_limited_llm_call(llm.invoke, evaluation_prompt)
         return response.content, False, {"asignatura": asignatura, "nivel": nivel}
 
     return evaluation_agent_executor
@@ -1066,166 +1064,360 @@ def create_study_guide_agent(llm, vectorstore):
 
 def create_router_agent(llm, planning_agent, evaluation_agent, study_guide_agent):
     """
-    Agente router que controla el flujo de la conversación y delega a agentes especializados.
+    Crea un agente router que identifica el tipo de solicitud, verifica información
+    completa y solo cuando tiene todos los datos necesarios deriva al especialista.
     """
-    system_prompt = """Eres un agente router que analiza solicitudes educativas.
+    system_prompt = """Eres un agente router inteligente que analiza solicitudes educativas.
     
-    DETERMINA el tipo de contenido que necesita el usuario:
-    - PLANIFICACION: si solicita planes de clase, planificaciones anuales, etc.
-    - EVALUACION: si solicita pruebas, exámenes, rúbricas, etc.
-    - GUIA: si solicita guías de estudio, material de repaso, etc.
+    Tu función es triple:
     
-    Responde SOLO con una de estas palabras: PLANIFICACION, EVALUACION o GUIA
+    1. IDENTIFICAR el tipo de contenido educativo solicitado:
+       - PLANIFICACION (planes de clase, anuales, unidades, etc.)
+       - EVALUACION (pruebas, exámenes, rúbricas, etc.)
+       - GUIA (guías de estudio, material de repaso, fichas, etc.)
+    
+    2. VERIFICAR que la solicitud contenga estos dos datos ESENCIALES:
+       - ASIGNATURA (Lenguaje, Matemáticas, Historia, Ciencias, etc.)
+       - NIVEL EDUCATIVO (1° básico, 5° básico, 2° medio, etc.)
+    
+    3. DETERMINAR si falta información para procesar la solicitud
+    
+    Responde SOLO en formato JSON con esta estructura:
+    {
+        "tipo": "PLANIFICACION|EVALUACION|GUIA",
+        "asignatura": "nombre de la asignatura o null",
+        "nivel": "nivel educativo o null",
+        "informacion_completa": true/false,
+        "informacion_faltante": ["asignatura", "nivel"] o [] si no falta nada
+    }
+    
+    IMPORTANTE: Usa comillas dobles para las cadenas y null para valores nulos.
     """
     
-    def router_execute(query):
+    def router_execute(query, asignatura=None, nivel=None):
         """
-        Analiza la consulta y delega al agente especializado apropiado.
+        Función del router que analiza la consulta, solicita información faltante
+        y deriva al especialista adecuado cuando tiene todos los datos.
+        
+        Args:
+            query: Consulta del usuario
+            asignatura: Asignatura previamente identificada (opcional)
+            nivel: Nivel educativo previamente identificado (opcional)
+            
+        Returns:
+            Tupla con (respuesta, necesita_info, info_actual, tipo_contenido)
         """
-        # 1. Determinar el tipo de contenido solicitado
+        # Si ya tenemos asignatura y nivel, no necesitamos analizar de nuevo
+        if asignatura and nivel:
+            # Determinar tipo de contenido
+            prompt = [
+                SystemMessage(content="Identifica qué tipo de contenido educativo solicita el usuario: PLANIFICACION, EVALUACION o GUIA. Responde solo con una de estas palabras."),
+                HumanMessage(content=query)
+            ]
+            result = rate_limited_llm_call(llm.invoke, prompt)
+            tipo = result.content.strip().upper()
+            
+            # Normalizar el tipo
+            if "PLAN" in tipo:
+                tipo = "PLANIFICACION"
+            elif "EVAL" in tipo:
+                tipo = "EVALUACION"
+            elif "GU" in tipo:
+                tipo = "GUIA"
+            else:
+                tipo = "PLANIFICACION"  # Por defecto
+            
+            # Derivar directamente al especialista
+            if tipo == "PLANIFICACION":
+                response, _, _ = planning_agent(query, asignatura, nivel)
+                return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
+            elif tipo == "EVALUACION":
+                response, _, _ = evaluation_agent(query, asignatura, nivel)
+                return response, False, {"asignatura": asignatura, "nivel": nivel}, "EVALUACION"
+            else:  # GUIA
+                response, _, _ = study_guide_agent(query, asignatura, nivel)
+                return response, False, {"asignatura": asignatura, "nivel": nivel}, "GUIA"
+        
+        # Si no tenemos toda la información, analizamos la consulta
         prompt = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=query)
         ]
         
+        result = rate_limited_llm_call(llm.invoke, prompt)
+        
         try:
-            # Obtener el tipo de contenido
-            tipo_result = rate_limited_llm_call(llm.invoke, prompt)
-            tipo = tipo_result.content.strip().upper()
+            # Parsear el resultado JSON de forma segura
+            import json
+            import re
             
-            # 2. Delegar al agente especializado correspondiente
+            # Extraer el bloque JSON de la respuesta
+            json_str = result.content
+            # Encontrar el primer '{' y el último '}'
+            start = json_str.find('{')
+            end = json_str.rfind('}') + 1
+            if start != -1 and end != 0:
+                json_str = json_str[start:end]
+            
+            # Limpiar y normalizar el JSON
+            json_str = json_str.replace("'", '"')
+            # Reemplazar valores de texto null por null de JSON
+            json_str = re.sub(r'"null"', 'null', json_str)
+            
+            # Parsear el JSON limpio
+            decision = json.loads(json_str)
+            
+            tipo = decision.get("tipo", "").upper()
+            # Usar los valores pasados por parámetro si están disponibles
+            asignatura = asignatura or decision.get("asignatura")
+            nivel = nivel or decision.get("nivel")
+            
+            # Convertir "null" a None
+            if asignatura == "null" or asignatura == "NULL":
+                asignatura = None
+            if nivel == "null" or nivel == "NULL":
+                nivel = None
+            
+            # Verificar si necesitamos más información
+            informacion_completa = decision.get("informacion_completa", False)
+            informacion_faltante = decision.get("informacion_faltante", [])
+            
+            # Si falta información, solicitarla
+            if not informacion_completa or not asignatura or not nivel:
+                response = "Para ayudarte mejor, necesito la siguiente información:\n\n"
+                
+                if not asignatura:
+                    response += "- ¿Para qué asignatura necesitas el material? (Ej: Matemáticas, Lenguaje, etc.)\n"
+                if not nivel:
+                    response += "- ¿Para qué nivel educativo? (Ej: 2° básico, 8° básico, 3° medio, etc.)\n"
+                
+                return response, True, {"asignatura": asignatura, "nivel": nivel}, tipo
+            
+            # Si tenemos toda la información, derivar al especialista
             if tipo == "PLANIFICACION":
-                response, needs_info, info = planning_agent(query)
+                response, _, _ = planning_agent(query, asignatura, nivel)
+                return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
             elif tipo == "EVALUACION":
-                response, needs_info, info = evaluation_agent(query)
+                response, _, _ = evaluation_agent(query, asignatura, nivel)
+                return response, False, {"asignatura": asignatura, "nivel": nivel}, "EVALUACION"
             elif tipo == "GUIA":
-                response, needs_info, info = study_guide_agent(query)
+                response, _, _ = study_guide_agent(query, asignatura, nivel)
+                return response, False, {"asignatura": asignatura, "nivel": nivel}, "GUIA"
             else:
-                return {
-                    "status": "error",
-                    "message": "No pude determinar qué tipo de contenido necesitas. ¿Podrías especificar si necesitas una planificación, evaluación o guía?"
-                }
-            
-            # 3. Procesar la respuesta del agente especializado
-            if needs_info:
-                return {
-                    "status": "need_info",
-                    "message": response
-                }
-            else:
-                return {
-                    "status": "success",
-                    "message": response
-                }
+                # Por defecto, usar planificación
+                response, _, _ = planning_agent(query, asignatura, nivel)
+                return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
                 
         except Exception as e:
-            print(f"Error en router_execute: {e}")
-            return {
-                "status": "error",
-                "message": "Hubo un error al procesar tu solicitud. ¿Podrías reformularla?"
-            }
+            print(f"\n⚠️ Error al procesar la decisión: {e}")
+            print(f"Respuesta original del LLM: {result.content}")
+            
+            # Intentar extraer tipo, asignatura y nivel de forma básica
+            tipo_match = re.search(r'(PLANIFICACI[OÓ]N|EVALUACI[OÓ]N|GU[IÍ]A)', query.upper())
+            tipo = "PLANIFICACION"  # Valor predeterminado
+            if tipo_match:
+                if "PLAN" in tipo_match.group(0):
+                    tipo = "PLANIFICACION"
+                elif "EVAL" in tipo_match.group(0):
+                    tipo = "EVALUACION"
+                elif "GUI" in tipo_match.group(0):
+                    tipo = "GUIA"
+            
+            # Verificar si tenemos información suficiente para continuar
+            if asignatura and nivel:
+                # Si tenemos asignatura y nivel, podemos continuar con el especialista
+                if tipo == "PLANIFICACION":
+                    response, _, _ = planning_agent(query, asignatura, nivel)
+                    return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
+                elif tipo == "EVALUACION":
+                    response, _, _ = evaluation_agent(query, asignatura, nivel)
+                    return response, False, {"asignatura": asignatura, "nivel": nivel}, "EVALUACION"
+                else:  # GUIA
+                    response, _, _ = study_guide_agent(query, asignatura, nivel)
+                    return response, False, {"asignatura": asignatura, "nivel": nivel}, "GUIA"
+            else:
+                # Si falta información, solicitarla
+                response = "Para ayudarte mejor, necesito la siguiente información:\n\n"
+                if not asignatura:
+                    response += "- ¿Para qué asignatura necesitas el material? (Ej: Matemáticas, Lenguaje, etc.)\n"
+                if not nivel:
+                    response += "- ¿Para qué nivel educativo? (Ej: 2° básico, 8° básico, 3° medio, etc.)\n"
+                
+                return response, True, {"asignatura": asignatura, "nivel": nivel}, tipo
     
     return router_execute
 
 def main():
     print("Inicializando Sistema Multi-Agente Educativo...")
-    
+
     # Configurar el LLM
+    print("\n⚙️ Inicializando componentes...")
     llm = ChatVertexAI(
         model_name="gemini-1.5-flash",
         temperature=0.5,
         max_output_tokens=8192,
         top_p=0.95,
-        top_k=40
+        top_k=40,
     )
 
     embeddings = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
 
-    # Verificar si ya existe la base de datos de Chroma
-    collection_name = "pdf-rag-chroma"
-    persist_directory = f"./{collection_name}"
-
+    # Inicializar vectorstore
     try:
+        collection_name = "pdf-rag-chroma"
+        persist_directory = f"./{collection_name}"
+
         if os.path.exists(persist_directory):
             print("\n📚 Cargando base de datos existente...")
             vectorstore = Chroma(
                 persist_directory=persist_directory,
                 embedding_function=embeddings,
-                collection_name=collection_name
+                collection_name=collection_name,
             )
-            collection_size = len(vectorstore.get()['ids'])
-            if collection_size > 0:
-                print(
-                    f"✅ Base de datos cargada exitosamente con {collection_size} documentos")
-            else:
-                raise ValueError("La base de datos existe pero está vacía")
+            collection_size = len(vectorstore.get()["ids"])
+            print(f"✅ Base de datos cargada con {collection_size} documentos")
         else:
-            # Solo cargar PDFs si necesitamos crear una nueva base de datos
-            print(
-                "\n📄 No se encontró base de datos existente. Cargando documentos PDF...")
+            print("\n📄 Cargando documentos PDF...")
             pdf_directory = "pdf_docs"
             if not os.path.exists(pdf_directory):
                 os.makedirs(pdf_directory)
-                print(f"📁 Se creó el directorio: {pdf_directory}")
-                print("❌ Por favor, coloca archivos PDF en el directorio y reinicia el programa.")
+                print(f"📁 Directorio creado: {pdf_directory}")
+                print("❌ Coloca archivos PDF en el directorio y reinicia el programa.")
                 return
 
             documents = load_pdf_documents(pdf_directory)
             if not documents:
-                print("❌ No se encontraron documentos PDF. Por favor, agrega archivos PDF y reinicia.")
+                print("❌ No se encontraron documentos PDF.")
                 return
 
-            print(f"✅ Se cargaron {len(documents)} páginas de documentos PDF")
-            
-            # Crear nueva base de datos
-            print("\n🔄 Creando nueva base de datos...")
+            print(f"✅ {len(documents)} páginas cargadas")
+            print("\n🔄 Creando base de datos...")
             vectorstore = create_vectorstore(documents, embeddings, collection_name)
-            
+
     except Exception as e:
         print(f"\n❌ Error al inicializar la base de datos: {e}")
         return
 
     # Crear agentes especializados
-    print("\n🤖 Creando agentes especializados...")
+    print("\n🤖 Inicializando agentes especializados...")
     planning_agent = create_planning_agent(llm, vectorstore)
+    print("✅ Agente de Planificación listo")
+
     evaluation_agent = create_evaluation_agent(llm, vectorstore)
+    print("✅ Agente de Evaluación listo")
+
     study_guide_agent = create_study_guide_agent(llm, vectorstore)
-    
+    print("✅ Agente de Guías de Estudio listo")
+
     # Crear agente router
-    print("🧭 Creando agente router...")
-    router = create_router_agent(llm, planning_agent, evaluation_agent, study_guide_agent)
+    print("\n🧭 Inicializando agente coordinador...")
+    router = create_router_agent(
+        llm, planning_agent, evaluation_agent, study_guide_agent
+    )
+    print("✅ Agente Coordinador listo")
 
-    print("\n" + "="*50)
-    print("🎯 Sistema Multi-Agente Educativo listo!")
-    print("Haz preguntas sobre planificaciones, evaluaciones o guías de estudio")
-    print("="*50)
+    print("\n" + "=" * 50)
+    print("🎯 Sistema listo para procesar solicitudes!")
+    print("Puedes solicitar:")
+    print("1. PLANIFICACIONES educativas")
+    print("2. EVALUACIONES")
+    print("3. GUÍAS de estudio")
+    print("=" * 50)
 
-    # Generar un ID de sesión único
+    # Generar ID de sesión
     thread_id = str(uuid.uuid4())[:8]
     print(f"\n🔑 ID de sesión: {thread_id}")
+    
+    # Estado para mantener información entre turnos de conversación
+    session_state = {
+        "pending_request": False,
+        "last_query": "",
+        "asignatura": None,
+        "nivel": None,
+        "tipo": None
+    }
 
     while True:
-        query = input("\n👤 Usuario: ")
-        if query.lower() in ["exit", "quit", "q"]:
-            print("\n👋 Saliendo del sistema. ¡Hasta luego!")
-            break
+        try:
+            query = input("\n👤 Usuario: ").strip()
+            
+            if query.lower() in ["exit", "quit", "q", "salir"]:
+                print("\n👋 ¡Hasta luego!")
+                break
 
         try:
-            print("\n🔄 Procesando tu solicitud...")
-            result = router(query)
-            
-            if result["status"] == "need_info":
-                print(f"\n❓ {result['message']}")
-            elif result["status"] == "success":
-                print(f"\n🤖 Respuesta: {result['message']}")
-                # Guardar la conversación
-                format_and_save_conversation(query, result['message'], thread_id)
-            else:
-                print(f"\n❌ {result['message']}")
+            # Si hay una solicitud pendiente de información
+            if session_state["pending_request"]:
+                # La nueva consulta podría contener la asignatura o el nivel
+                if not session_state["asignatura"]:
+                    session_state["asignatura"] = query
+                    print("\n🔄 Información registrada. Procesando...")
+                    # Volvemos a llamar al router con la nueva información
+                    response, needs_info, info, tipo = router(
+                        session_state["last_query"], 
+                        session_state["asignatura"], 
+                        session_state["nivel"]
+                    )
+                elif not session_state["nivel"]:
+                    session_state["nivel"] = query
+                    print("\n🔄 Información registrada. Procesando...")
+                    # Volvemos a llamar al router con la nueva información
+                    response, needs_info, info, tipo = router(
+                        session_state["last_query"], 
+                        session_state["asignatura"], 
+                        session_state["nivel"]
+                    )
                 
+                if needs_info:
+                    # Aún falta información
+                    print(f"\n❓ {response}")
+                    session_state["pending_request"] = True
+                    # No actualizamos last_query aquí, mantenemos la consulta original
+                else:
+                    # Tenemos toda la información, mostrar respuesta final
+                    print(f"\n🤖 Respuesta: {response}")
+                    # Guardar la conversación completa
+                    full_query = f"{session_state['last_query']} (Asignatura: {session_state['asignatura']}, Nivel: {session_state['nivel']})"
+                    format_and_save_conversation(full_query, response, thread_id)
+                    # Reiniciar el estado
+                    session_state = {
+                        "pending_request": False,
+                        "last_query": "",
+                        "asignatura": None,
+                        "nivel": None,
+                        "tipo": None
+                    }
+            else:
+                # Nueva solicitud
+                print("\n🔄 Procesando tu solicitud...")
+                response, needs_info, info, tipo = router(query)
+                
+                if needs_info:
+                    # Necesitamos más información
+                    print(f"\n❓ {response}")
+                    session_state = {
+                        "pending_request": True,
+                        "last_query": query,
+                        "asignatura": info.get("asignatura"),
+                        "nivel": info.get("nivel"),
+                        "tipo": tipo
+                    }
+                else:
+                    # Tenemos toda la información, mostrar respuesta final
+                    print(f"\n🤖 Respuesta: {response}")
+                    format_and_save_conversation(query, response, thread_id)
+        
         except Exception as e:
-            print(f"\n❌ Ocurrió un error: {e}")
+            print(f"\n❌ Error: {e}")
             print("Por favor, intenta reformular tu solicitud.")
-
+            # Reiniciar el estado en caso de error
+            session_state = {
+                "pending_request": False,
+                "last_query": "",
+                "asignatura": None,
+                "nivel": None,
+                "tipo": None
+            }
+        
 if __name__ == "__main__":
     main()
