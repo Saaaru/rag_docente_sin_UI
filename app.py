@@ -23,6 +23,7 @@ import uuid
 from ratelimit import limits, sleep_and_retry
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, TypedDict
+import json
 
 
 # Configure stdout to handle special characters properly
@@ -33,7 +34,7 @@ dotenv_path = os.path.join(os.path.dirname(__file__), 'db', '.env')
 load_dotenv(dotenv_path)
 
 # Credenciales para usar VERTEX_AI
-credentials_path = r"C:/Users/Dante/Desktop/rag_docente/db/gen-lang-client-0115469242-239dc466873d.json"
+credentials_path = r"C:/Users/Dante/Desktop/rag_docente_sin_UI/db/gen-lang-client-0115469242-239dc466873d.json"
 if not os.path.exists(credentials_path):
     raise FileNotFoundError(
         f"No se encontró el archivo de credenciales en: {credentials_path}")
@@ -475,7 +476,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         legal_query = f"requisitos normativos para planificaciones educativas en {nivel} {asignatura}"
         legal_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                    "k": 2, "filter": {"source": {"$contains": "leyes"}}})
-        legal_docs = legal_retriever.get_relevant_documents(legal_query)
+        legal_docs = legal_retriever.invoke(legal_query)
         if legal_docs:
             results.append("MARCO NORMATIVO:")
             for doc in legal_docs:
@@ -485,7 +486,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         orientation_query = f"orientaciones para planificación en {nivel} {asignatura}"
         orientation_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                          "k": 2, "filter": {"source": {"$contains": "orientaciones"}}})
-        orientation_docs = orientation_retriever.get_relevant_documents(
+        orientation_docs = orientation_retriever.invoke(
             orientation_query)
         if orientation_docs:
             results.append("\nORIENTACIONES:")
@@ -496,7 +497,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         curriculum_query = f"objetivos de aprendizaje {nivel} {asignatura}"
         curriculum_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                         "k": 3, "filter": {"source": {"$contains": "bases curriculares"}}})
-        curriculum_docs = curriculum_retriever.get_relevant_documents(
+        curriculum_docs = curriculum_retriever.invoke(
             curriculum_query)
         if curriculum_docs:
             results.append("\nBASES CURRICULARES:")
@@ -507,7 +508,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         proposal_query = f"propuesta planificación {nivel} {asignatura} {query}"
         proposal_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                       "k": 2, "filter": {"source": {"$contains": "propuesta"}}})
-        proposal_docs = proposal_retriever.get_relevant_documents(
+        proposal_docs = proposal_retriever.invoke(
             proposal_query)
         if proposal_docs:
             results.append("\nPROPUESTAS EXISTENTES:")
@@ -518,7 +519,7 @@ def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
         activity_query = f"actividades sugeridas {nivel} {asignatura} {query}"
         activity_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
                                                       "k": 3, "filter": {"source": {"$contains": "actividades sugeridas"}}})
-        activity_docs = activity_retriever.get_relevant_documents(
+        activity_docs = activity_retriever.invoke(
             activity_query)
         if activity_docs:
             results.append("\nACTIVIDADES SUGERIDAS:")
@@ -852,7 +853,7 @@ def create_planning_agent(llm, vectorstore):
             search_kwargs={"k": 5, "fetch_k": 10}
         )
 
-        retrieved_docs = retriever.get_relevant_documents(enhanced_query)
+        retrieved_docs = retriever.invoke(enhanced_query)
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
         # Generar la planificación
@@ -946,7 +947,7 @@ def create_evaluation_agent(llm, vectorstore):
             search_kwargs={"k": 5, "fetch_k": 10}
         )
 
-        retrieved_docs = retriever.get_relevant_documents(enhanced_query)
+        retrieved_docs = retriever.invoke(enhanced_query)
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
         # Generar la evaluación
@@ -1041,7 +1042,7 @@ def create_study_guide_agent(llm, vectorstore):
             search_kwargs={"k": 5, "fetch_k": 10}
         )
 
-        retrieved_docs = retriever.get_relevant_documents(enhanced_query)
+        retrieved_docs = retriever.invoke(enhanced_query)
         context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
         # Generar la guía
@@ -1065,195 +1066,70 @@ def create_study_guide_agent(llm, vectorstore):
 
 def create_router_agent(llm, planning_agent, evaluation_agent, study_guide_agent):
     """
-    Crea un agente router que identifica el tipo de solicitud, verifica información
-    completa y solo cuando tiene todos los datos necesarios deriva al especialista.
+    Agente router que controla el flujo de la conversación y delega a agentes especializados.
     """
-    system_prompt = """Eres un agente router inteligente que analiza solicitudes educativas.
+    system_prompt = """Eres un agente router que analiza solicitudes educativas.
     
-    Tu función es triple:
+    DETERMINA el tipo de contenido que necesita el usuario:
+    - PLANIFICACION: si solicita planes de clase, planificaciones anuales, etc.
+    - EVALUACION: si solicita pruebas, exámenes, rúbricas, etc.
+    - GUIA: si solicita guías de estudio, material de repaso, etc.
     
-    1. IDENTIFICAR el tipo de contenido educativo solicitado:
-       - PLANIFICACION (planes de clase, anuales, unidades, etc.)
-       - EVALUACION (pruebas, exámenes, rúbricas, etc.)
-       - GUIA (guías de estudio, material de repaso, fichas, etc.)
-    
-    2. VERIFICAR que la solicitud contenga estos dos datos ESENCIALES:
-       - ASIGNATURA (Lenguaje, Matemáticas, Historia, Ciencias, etc.)
-       - NIVEL EDUCATIVO (1° básico, 5° básico, 2° medio, etc.)
-    
-    3. DETERMINAR si falta información para procesar la solicitud
-    
-    Responde SOLO en formato JSON con esta estructura:
-    {
-        "tipo": "PLANIFICACION|EVALUACION|GUIA",
-        "asignatura": "nombre de la asignatura o null",
-        "nivel": "nivel educativo o null",
-        "informacion_completa": true/false,
-        "informacion_faltante": ["asignatura", "nivel"] o [] si no falta nada
-    }
-    
-    IMPORTANTE: Usa comillas dobles para las cadenas y null para valores nulos.
+    Responde SOLO con una de estas palabras: PLANIFICACION, EVALUACION o GUIA
     """
     
-    def router_execute(query, asignatura=None, nivel=None):
+    def router_execute(query):
         """
-        Función del router que analiza la consulta, solicita información faltante
-        y deriva al especialista adecuado cuando tiene todos los datos.
-        
-        Args:
-            query: Consulta del usuario
-            asignatura: Asignatura previamente identificada (opcional)
-            nivel: Nivel educativo previamente identificado (opcional)
-            
-        Returns:
-            Tupla con (respuesta, necesita_info, info_actual, tipo_contenido)
+        Analiza la consulta y delega al agente especializado apropiado.
         """
-        # Si ya tenemos asignatura y nivel, no necesitamos analizar de nuevo
-        if asignatura and nivel:
-            # Determinar tipo de contenido
-            prompt = [
-                SystemMessage(content="Identifica qué tipo de contenido educativo solicita el usuario: PLANIFICACION, EVALUACION o GUIA. Responde solo con una de estas palabras."),
-                HumanMessage(content=query)
-            ]
-            result = rate_limited_llm_call(llm.invoke, prompt)
-            tipo = result.content.strip().upper()
-            
-            # Normalizar el tipo
-            if "PLAN" in tipo:
-                tipo = "PLANIFICACION"
-            elif "EVAL" in tipo:
-                tipo = "EVALUACION"
-            elif "GU" in tipo:
-                tipo = "GUIA"
-            else:
-                tipo = "PLANIFICACION"  # Por defecto
-            
-            # Derivar directamente al especialista
-            if tipo == "PLANIFICACION":
-                response, _, _ = planning_agent(query, asignatura, nivel)
-                return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
-            elif tipo == "EVALUACION":
-                response, _, _ = evaluation_agent(query, asignatura, nivel)
-                return response, False, {"asignatura": asignatura, "nivel": nivel}, "EVALUACION"
-            else:  # GUIA
-                response, _, _ = study_guide_agent(query, asignatura, nivel)
-                return response, False, {"asignatura": asignatura, "nivel": nivel}, "GUIA"
-        
-        # Si no tenemos toda la información, analizamos la consulta
+        # 1. Determinar el tipo de contenido solicitado
         prompt = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=query)
         ]
         
-        result = rate_limited_llm_call(llm.invoke, prompt)
-        
         try:
-            # Parsear el resultado JSON de forma segura
-            import json
-            import re
+            # Obtener el tipo de contenido
+            tipo_result = rate_limited_llm_call(llm.invoke, prompt)
+            tipo = tipo_result.content.strip().upper()
             
-            # Extraer el bloque JSON de la respuesta
-            json_str = result.content
-            # Encontrar el primer '{' y el último '}'
-            start = json_str.find('{')
-            end = json_str.rfind('}') + 1
-            if start != -1 and end != 0:
-                json_str = json_str[start:end]
-            
-            # Limpiar y normalizar el JSON
-            json_str = json_str.replace("'", '"')
-            # Reemplazar valores de texto null por null de JSON
-            json_str = re.sub(r'"null"', 'null', json_str)
-            
-            # Parsear el JSON limpio
-            decision = json.loads(json_str)
-            
-            tipo = decision.get("tipo", "").upper()
-            # Usar los valores pasados por parámetro si están disponibles
-            asignatura = asignatura or decision.get("asignatura")
-            nivel = nivel or decision.get("nivel")
-            
-            # Convertir "null" a None
-            if asignatura == "null" or asignatura == "NULL":
-                asignatura = None
-            if nivel == "null" or nivel == "NULL":
-                nivel = None
-            
-            # Verificar si necesitamos más información
-            informacion_completa = decision.get("informacion_completa", False)
-            informacion_faltante = decision.get("informacion_faltante", [])
-            
-            # Si falta información, solicitarla
-            if not informacion_completa or not asignatura or not nivel:
-                response = "Para ayudarte mejor, necesito la siguiente información:\n\n"
-                
-                if not asignatura:
-                    response += "- ¿Para qué asignatura necesitas el material? (Ej: Matemáticas, Lenguaje, etc.)\n"
-                if not nivel:
-                    response += "- ¿Para qué nivel educativo? (Ej: 2° básico, 8° básico, 3° medio, etc.)\n"
-                
-                return response, True, {"asignatura": asignatura, "nivel": nivel}, tipo
-            
-            # Si tenemos toda la información, derivar al especialista
+            # 2. Delegar al agente especializado correspondiente
             if tipo == "PLANIFICACION":
-                response, _, _ = planning_agent(query, asignatura, nivel)
-                return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
+                response, needs_info, info = planning_agent(query)
             elif tipo == "EVALUACION":
-                response, _, _ = evaluation_agent(query, asignatura, nivel)
-                return response, False, {"asignatura": asignatura, "nivel": nivel}, "EVALUACION"
+                response, needs_info, info = evaluation_agent(query)
             elif tipo == "GUIA":
-                response, _, _ = study_guide_agent(query, asignatura, nivel)
-                return response, False, {"asignatura": asignatura, "nivel": nivel}, "GUIA"
+                response, needs_info, info = study_guide_agent(query)
             else:
-                # Por defecto, usar planificación
-                response, _, _ = planning_agent(query, asignatura, nivel)
-                return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
+                return {
+                    "status": "error",
+                    "message": "No pude determinar qué tipo de contenido necesitas. ¿Podrías especificar si necesitas una planificación, evaluación o guía?"
+                }
+            
+            # 3. Procesar la respuesta del agente especializado
+            if needs_info:
+                return {
+                    "status": "need_info",
+                    "message": response
+                }
+            else:
+                return {
+                    "status": "success",
+                    "message": response
+                }
                 
         except Exception as e:
-            print(f"\n⚠️ Error al procesar la decisión: {e}")
-            print(f"Respuesta original del LLM: {result.content}")
-            
-            # Intentar extraer tipo, asignatura y nivel de forma básica
-            tipo_match = re.search(r'(PLANIFICACI[OÓ]N|EVALUACI[OÓ]N|GU[IÍ]A)', query.upper())
-            tipo = "PLANIFICACION"  # Valor predeterminado
-            if tipo_match:
-                if "PLAN" in tipo_match.group(0):
-                    tipo = "PLANIFICACION"
-                elif "EVAL" in tipo_match.group(0):
-                    tipo = "EVALUACION"
-                elif "GUI" in tipo_match.group(0):
-                    tipo = "GUIA"
-            
-            # Verificar si tenemos información suficiente para continuar
-            if asignatura and nivel:
-                # Si tenemos asignatura y nivel, podemos continuar con el especialista
-                if tipo == "PLANIFICACION":
-                    response, _, _ = planning_agent(query, asignatura, nivel)
-                    return response, False, {"asignatura": asignatura, "nivel": nivel}, "PLANIFICACION"
-                elif tipo == "EVALUACION":
-                    response, _, _ = evaluation_agent(query, asignatura, nivel)
-                    return response, False, {"asignatura": asignatura, "nivel": nivel}, "EVALUACION"
-                else:  # GUIA
-                    response, _, _ = study_guide_agent(query, asignatura, nivel)
-                    return response, False, {"asignatura": asignatura, "nivel": nivel}, "GUIA"
-            else:
-                # Si falta información, solicitarla
-                response = "Para ayudarte mejor, necesito la siguiente información:\n\n"
-                if not asignatura:
-                    response += "- ¿Para qué asignatura necesitas el material? (Ej: Matemáticas, Lenguaje, etc.)\n"
-                if not nivel:
-                    response += "- ¿Para qué nivel educativo? (Ej: 2° básico, 8° básico, 3° medio, etc.)\n"
-                
-                return response, True, {"asignatura": asignatura, "nivel": nivel}, tipo
+            print(f"Error en router_execute: {e}")
+            return {
+                "status": "error",
+                "message": "Hubo un error al procesar tu solicitud. ¿Podrías reformularla?"
+            }
     
     return router_execute
 
-# Modificación de la función main para implementar arquitectura multi-agente
-
-
 def main():
     print("Inicializando Sistema Multi-Agente Educativo...")
-
+    
     # Configurar el LLM
     llm = ChatVertexAI(
         model_name="gemini-1.5-flash",
@@ -1327,15 +1203,6 @@ def main():
     # Generar un ID de sesión único
     thread_id = str(uuid.uuid4())[:8]
     print(f"\n🔑 ID de sesión: {thread_id}")
-    
-    # Estado para mantener información entre turnos de conversación
-    session_state = {
-        "pending_request": False,
-        "last_query": "",
-        "asignatura": None,
-        "nivel": None,
-        "tipo": None
-    }
 
     while True:
         query = input("\n👤 Usuario: ")
@@ -1344,78 +1211,21 @@ def main():
             break
 
         try:
-            # Si hay una solicitud pendiente de información
-            if session_state["pending_request"]:
-                # La nueva consulta podría contener la asignatura o el nivel
-                if not session_state["asignatura"]:
-                    session_state["asignatura"] = query
-                    print("\n🔄 Información registrada. Procesando...")
-                    # Volvemos a llamar al router con la nueva información
-                    response, needs_info, info, tipo = router(
-                        session_state["last_query"], 
-                        session_state["asignatura"], 
-                        session_state["nivel"]
-                    )
-                elif not session_state["nivel"]:
-                    session_state["nivel"] = query
-                    print("\n🔄 Información registrada. Procesando...")
-                    # Volvemos a llamar al router con la nueva información
-                    response, needs_info, info, tipo = router(
-                        session_state["last_query"], 
-                        session_state["asignatura"], 
-                        session_state["nivel"]
-                    )
-                
-                if needs_info:
-                    # Aún falta información
-                    print(f"\n❓ {response}")
-                    session_state["pending_request"] = True
-                    # No actualizamos last_query aquí, mantenemos la consulta original
-                else:
-                    # Tenemos toda la información, mostrar respuesta final
-                    print(f"\n🤖 Respuesta: {response}")
-                    # Guardar la conversación completa
-                    full_query = f"{session_state['last_query']} (Asignatura: {session_state['asignatura']}, Nivel: {session_state['nivel']})"
-                    format_and_save_conversation(full_query, response, thread_id)
-                    # Reiniciar el estado
-                    session_state = {
-                        "pending_request": False,
-                        "last_query": "",
-                        "asignatura": None,
-                        "nivel": None,
-                        "tipo": None
-                    }
+            print("\n🔄 Procesando tu solicitud...")
+            result = router(query)
+            
+            if result["status"] == "need_info":
+                print(f"\n❓ {result['message']}")
+            elif result["status"] == "success":
+                print(f"\n🤖 Respuesta: {result['message']}")
+                # Guardar la conversación
+                format_and_save_conversation(query, result['message'], thread_id)
             else:
-                # Nueva solicitud
-                print("\n🔄 Procesando tu solicitud...")
-                response, needs_info, info, tipo = router(query)
+                print(f"\n❌ {result['message']}")
                 
-                if needs_info:
-                    # Necesitamos más información
-                    print(f"\n❓ {response}")
-                    session_state = {
-                        "pending_request": True,
-                        "last_query": query,
-                        "asignatura": info.get("asignatura"),
-                        "nivel": info.get("nivel"),
-                        "tipo": tipo
-                    }
-                else:
-                    # Tenemos toda la información, mostrar respuesta final
-                    print(f"\n🤖 Respuesta: {response}")
-                    format_and_save_conversation(query, response, thread_id)
-        
         except Exception as e:
             print(f"\n❌ Ocurrió un error: {e}")
             print("Por favor, intenta reformular tu solicitud.")
-            # Reiniciar el estado en caso de error
-            session_state = {
-                "pending_request": False,
-                "last_query": "",
-                "asignatura": None,
-                "nivel": None,
-                "tipo": None
-            }
-        
+
 if __name__ == "__main__":
     main()
