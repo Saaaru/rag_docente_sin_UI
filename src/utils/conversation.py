@@ -1,26 +1,6 @@
 import os
 import time
-import datetime
-import sys
-from ratelimit import limits, sleep_and_retry
-from typing import Callable, Any
-
-# Configure stdout to handle special characters properly
-sys.stdout.reconfigure(encoding='utf-8')
-
-# Definir el límite de peticiones (por ejemplo, 180 por minuto para estar seguros)
-CALLS_PER_MINUTE = 150
-PERIOD = 60
-WAIT_TIME = 1
-
-@sleep_and_retry
-@limits(calls=CALLS_PER_MINUTE, period=PERIOD)
-def rate_limited_llm_call(func: Callable, *args, **kwargs) -> Any:
-    """
-    Wrapper function para las llamadas al LLM con rate limiting mejorado
-    """
-    time.sleep(WAIT_TIME)
-    return func(*args, **kwargs)
+from config import CONVERSATION_DIRECTORY
 
 def format_and_save_conversation(query: str, response: str, thread_id: str, output_dir: str = "conversaciones") -> str:
     """

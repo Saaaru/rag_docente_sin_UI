@@ -1,0 +1,1 @@
+# Asegurarse de que no haya importaciones que comiencen con 'src.' 

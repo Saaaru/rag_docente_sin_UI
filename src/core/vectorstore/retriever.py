@@ -1,124 +1,29 @@
-import os
-from typing import List
-from langchain_google_vertexai import VertexAIEmbeddings
-from langchain_chroma import Chroma
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from utils import rate_limited_llm_call
+from utils.rate_limiter import rate_limited_llm_call
 
-def load_pdf_documents(directory_path: str) -> List:
-    """
-    Loads all PDF documents from a given directory and its subdirectories recursively.
-
-    Args:
-        directory_path: Path to the directory containing PDF files
-
-    Returns:
-        List of Document objects containing the content of the PDFs
-    """
-    if not os.path.exists(directory_path):
-        print(f"Directory {directory_path} does not exist.")
-        return []
-
-    documents = []
-
-    # Recorrer el directorio y sus subdirectorios
-    for root, dirs, files in os.walk(directory_path):
-        pdf_files = [f for f in files if f.endswith('.pdf')]
-
-        for pdf_file in pdf_files:
-            try:
-                file_path = os.path.join(root, pdf_file)
-                print(f"Loading PDF: {file_path}")
-                # PyPDFLoader handles both text and images
-                loader = PyPDFLoader(file_path)
-                documents.extend(loader.load())
-                print(
-                    f"Successfully loaded {pdf_file} with {len(loader.load())} pages")
-            except Exception as e:
-                print(f"Error loading {pdf_file}: {e}")
-
-    if not documents:
-        print(f"No PDF files found in {directory_path} or its subdirectories.")
-
-    return documents
-
-def create_vectorstore(documents, embeddings, collection_name="pdf-rag-chroma"):
-    """
-    Crea o carga un Chroma vector store.
-    Si la base de datos existe, simplemente la carga sin procesar nuevos documentos.
-    Solo crea una nueva si no existe.
-    """
-    persist_directory = f"./{collection_name}"
-
-    # Si existe la base de datos, cargarla y retornar
-    if os.path.exists(persist_directory):
-        print(
-            f"\n📚 Base de datos Chroma existente encontrada en {persist_directory}")
-        try:
-            vectorstore = Chroma(
-                persist_directory=persist_directory,
-                embedding_function=embeddings,
-                collection_name=collection_name
-            )
-            collection_size = len(vectorstore.get()['ids'])
-            print(
-                f"✅ Vectorstore cargado exitosamente con {collection_size} documentos")
-            return vectorstore
-        except Exception as e:
-            print(f"❌ Error crítico al cargar la base de datos existente: {e}")
-            raise e
-
-    # Solo si NO existe la base de datos, crear una nueva
-    print("\n⚠️ No se encontró una base de datos existente. Creando nueva...")
-
-    if not documents:
-        raise ValueError(
-            "❌ No se proporcionaron documentos para crear el vectorstore")
-
-    print("📄 Procesando documentos...")
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
-        chunk_overlap=300,
-        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
-        length_function=len
-    )
-    chunks = text_splitter.split_documents(documents)
-    print(f"✅ Documentos divididos en {len(chunks)} chunks")
-
-    print("🔄 Creando nuevo vectorstore...")
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        collection_name=collection_name,
-        persist_directory=persist_directory
-    )
-
-    collection_size = len(vectorstore.get()['ids'])
-    print(f"✅ Nuevo vectorstore creado con {collection_size} documentos")
-
-    return vectorstore
 
 def create_filtered_retriever(vectorstore, filter_text, k=2):
     """
-    Crea un retriever que filtra los resultados después de la búsqueda
+    Retriever mejorado con filtrado más preciso
     """
-    base_retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": k * 2}  # Duplicamos k para compensar el filtrado posterior
-    )
-    
     def filtered_search(query):
-        docs = base_retriever.invoke(query)
-        # Filtrar documentos que contengan el texto especificado en su source
+        # Usar MMR para diversidad en resultados
+        docs = vectorstore.max_marginal_relevance_search(
+            query=query,
+            k=k * 2,
+            fetch_k=k * 4,
+            lambda_mult=0.7,
+            filter={"source": {"$contains": filter_text.lower()}}
+        )
+        
+        # Aplicar filtrado adicional si es necesario
         filtered_docs = [
             doc for doc in docs 
             if hasattr(doc, 'metadata') 
-            and 'source' in doc.metadata 
-            and filter_text.lower() in doc.metadata['source'].lower()
+            and 'source' in doc.metadata
         ]
-        return filtered_docs[:k]  # Devolver solo los k primeros documentos
+        
+        return filtered_docs[:k]
     
     return filtered_search
 
@@ -280,52 +185,37 @@ def create_enhanced_retriever_tool(vectorstore, llm, conversation_history=None,
     from langchain.tools import Tool
 
     def enhanced_retriever_with_answer(query: str) -> str:
-        print(f"Ejecutando búsqueda mejorada para: {query}")
+        # 1. Primero, buscar en bases curriculares
+        curriculum_docs = vectorstore.max_marginal_relevance_search(
+            query=query,
+            k=3,
+            filter={"source": {"$contains": "bases_curriculares"}},
+            fetch_k=6,
+            lambda_mult=0.7
+        )
 
-        # Si hay historial, usarlo para mejorar la búsqueda
-        if conversation_history and len(conversation_history) > 0:
-            # Crear un prompt para reformular la consulta
-            context_prompt = SystemMessage(content="""
-            Eres un especialista en educación chilena. Tu tarea es reformular la consulta del usuario para extraer información relevante de documentos curriculares que le ayude a crear:
+        # 2. Luego, buscar en orientaciones didácticas
+        orientation_docs = vectorstore.max_marginal_relevance_search(
+            query=query,
+            k=2,
+            filter={"source": {"$contains": "orientaciones"}},
+            fetch_k=4,
+            lambda_mult=0.7
+        )
 
-            1. Planificaciones educativas para niveles desde sala cuna hasta educación media
-            2. Actividades adaptadas al currículum nacional
-            3. Evaluaciones alineadas con objetivos de aprendizaje oficiales
+        # 3. Finalmente, buscar en ejemplos y actividades
+        activity_docs = vectorstore.max_marginal_relevance_search(
+            query=query,
+            k=2,
+            filter={"source": {"$contains": "actividades"}},
+            fetch_k=4,
+            lambda_mult=0.7
+        )
 
-            Basado en el historial de la conversación y la pregunta actual, reformula la consulta para encontrar información curricular específica que satisfaga la necesidad del docente.
-            """)
-
-            try:
-                # Reformular la consulta
-                enhanced_query_response = rate_limited_llm_call(
-                    llm.invoke, context_prompt)
-                enhanced_query = enhanced_query_response.content
-                print(f"Consulta mejorada: {enhanced_query}")
-
-                # Realizar la búsqueda con la consulta mejorada
-                retrieved_docs = vectorstore.max_marginal_relevance_search(
-                    query=enhanced_query,
-                    k=6,
-                    fetch_k=10,
-                    lambda_mult=0.7
-                )
-            except Exception as e:
-                print(f"Error al mejorar la consulta: {e}")
-                retrieved_docs = vectorstore.max_marginal_relevance_search(
-                    query=query,
-                    k=6,
-                    fetch_k=10,
-                    lambda_mult=0.7
-                )
-        else:
-            retrieved_docs = vectorstore.max_marginal_relevance_search(
-                query=query,
-                k=6,
-                fetch_k=10,
-                lambda_mult=0.7
-            )
-
-        return direct_answer_generator(llm, query, retrieved_docs, retrieved_docs, conversation_history)
+        # Combinar resultados priorizando bases curriculares
+        all_docs = curriculum_docs + orientation_docs + activity_docs
+        
+        return direct_answer_generator(llm, query, all_docs, all_docs, conversation_history)
 
     return Tool(
         name=tool_name,
@@ -398,107 +288,39 @@ def create_contextual_retriever_tool(vectorstore, llm, conversation_history=None
         func=contextual_retriever_with_answer,
     )
 
-def create_strategic_search_tool(vectorstore, llm, conversation_history=None,
-                               tool_name="strategic_curriculum_search",
-                               tool_description="Realiza una búsqueda estratégica en todos los recursos curriculares siguiendo un orden específico para planificaciones completas."):
-    from langchain.tools import Tool
-
-    context_prompt = SystemMessage(content="""
-    Como especialista en currículum chileno, sigue este proceso de búsqueda estratégica:
-
-    1. LEYES: Identifica los requisitos normativos aplicables
-    2. ORIENTACIONES: Comprende la estructura recomendada
-    3. BASES CURRICULARES: Encuentra objetivos específicos por nivel y asignatura
-    4. PROPUESTAS: Busca planificaciones existentes similares
-    5. ACTIVIDADES SUGERIDAS: Complementa con actividades concretas
-
-    Reformula la consulta del usuario para encontrar información siguiendo este orden preciso.
-    """)
-
-    def strategic_search_with_answer(query: str) -> str:
-        # Extraer nivel y asignatura de la consulta
-        extraction_prompt = [
-            context_prompt,
-            HumanMessage(
-                content=f"Extrae el nivel educativo y asignatura de esta consulta: '{query}'. Responde solo con el formato 'NIVEL: X, ASIGNATURA: Y'.")
-        ]
-        extraction_response = rate_limited_llm_call(
-            llm.invoke, extraction_prompt).content
-
-        try:
-            nivel = extraction_response.split(
-                "NIVEL:")[1].split(",")[0].strip()
-            asignatura = extraction_response.split("ASIGNATURA:")[1].strip()
-        except:
-            nivel = ""
-            asignatura = ""
-
-        results = []
-
-        # Paso 1: Buscar en leyes
-        legal_query = f"requisitos normativos para planificaciones educativas en {nivel} {asignatura}"
-        legal_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
-                                                   "k": 2, "filter": {"source": {"$contains": "leyes"}}})
-        legal_docs = legal_retriever.invoke(legal_query)
-        if legal_docs:
-            results.append("MARCO NORMATIVO:")
-            for doc in legal_docs:
-                results.append(doc.page_content[:500] + "...")
-
-        # Paso 2: Buscar en orientaciones
-        orientation_query = f"orientaciones para planificación en {nivel} {asignatura}"
-        orientation_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
-                                                         "k": 2, "filter": {"source": {"$contains": "orientaciones"}}})
-        orientation_docs = orientation_retriever.invoke(
-            orientation_query)
-        if orientation_docs:
-            results.append("\nORIENTACIONES:")
-            for doc in orientation_docs:
-                results.append(doc.page_content[:500] + "...")
-
-        # Paso 3: Buscar en bases curriculares
-        curriculum_query = f"objetivos de aprendizaje {nivel} {asignatura}"
-        curriculum_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
-                                                        "k": 3, "filter": {"source": {"$contains": "bases curriculares"}}})
-        curriculum_docs = curriculum_retriever.invoke(
-            curriculum_query)
-        if curriculum_docs:
-            results.append("\nBASES CURRICULARES:")
-            for doc in curriculum_docs:
-                results.append(doc.page_content[:500] + "...")
-
-        # Paso 4: Buscar en propuestas
-        proposal_query = f"propuesta planificación {nivel} {asignatura} {query}"
-        proposal_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
-                                                      "k": 2, "filter": {"source": {"$contains": "propuesta"}}})
-        proposal_docs = proposal_retriever.invoke(
-            proposal_query)
-        if proposal_docs:
-            results.append("\nPROPUESTAS EXISTENTES:")
-            for doc in proposal_docs:
-                results.append(doc.page_content[:500] + "...")
-
-        # Paso 5: Buscar en actividades sugeridas
-        activity_query = f"actividades sugeridas {nivel} {asignatura} {query}"
-        activity_retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={
-                                                      "k": 3, "filter": {"source": {"$contains": "actividades sugeridas"}}})
-        activity_docs = activity_retriever.invoke(
-            activity_query)
-        if activity_docs:
-            results.append("\nACTIVIDADES SUGERIDAS:")
-            for doc in activity_docs:
-                results.append(doc.page_content[:500] + "...")
-
-        if not results:
-            return "No se encontró información específica siguiendo el proceso de búsqueda estratégica."
-
-        return "\n".join(results)
-
-    return Tool(
-        name=tool_name,
-        func=strategic_search_with_answer,
-        description=tool_description
+def create_strategic_retriever(vectorstore, query, filters=None):
+    """
+    Búsqueda estratégica en la base de datos vectorial
+    """
+    results = []
+    
+    # 1. Búsqueda por relevancia (MMR)
+    mmr_results = vectorstore.max_marginal_relevance_search(
+        query=query,
+        k=5,
+        fetch_k=10,
+        lambda_mult=0.7,
+        filter=filters
     )
+    results.extend(mmr_results)
+    
+    # 2. Búsqueda por similitud semántica
+    similarity_results = vectorstore.similarity_search(
+        query=query,
+        k=3,
+        filter=filters
+    )
+    results.extend(similarity_results)
+    
+    # 3. Eliminar duplicados manteniendo el orden
+    seen = set()
+    unique_results = []
+    for doc in results:
+        if doc.page_content not in seen:
+            seen.add(doc.page_content)
+            unique_results.append(doc)
+    
+    return unique_results
 
 def create_langgraph_agent(llm, tools):
     """
