@@ -1,7 +1,7 @@
 import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.rate_limiter import rate_limited_llm_call
-from core.vectorstore.retriever import create_enhanced_retriever_tool
+from core.vectorstore.retriever import retrieve_documents, get_context_from_documents
 
 def create_evaluation_agent(llm, vectorstore):
     """
@@ -112,18 +112,25 @@ def create_evaluation_agent(llm, vectorstore):
             return response, True, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
 
         # Si tenemos toda la información, generar la evaluación
-        enhanced_query = f"Crear evaluación para la asignatura de {asignatura} para el nivel {nivel} para el mes de {mes}"
+        enhanced_query = f"evaluación {asignatura} {nivel} {mes} objetivos aprendizaje indicadores logro contenidos preguntas instrumento evaluación"
 
-        # Buscar información relevante en el vectorstore
-        retriever = vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 5, "fetch_k": 10}
+        # Buscar información relevante de manera estratégica
+        priority_categories = ["bases curriculares", "orientaciones", "propuesta", "actividades sugeridas"]
+        
+        # Utilizar retrieve_documents para obtener documentos relevantes
+        retrieved_docs = retrieve_documents(
+            vectorstore=vectorstore,
+            query=enhanced_query,
+            categories=priority_categories,
+            k=7
         )
+        
+        # Extraer contexto de los documentos recuperados
+        context, sources = get_context_from_documents(retrieved_docs)
+        
+        source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
 
-        retrieved_docs = retriever.invoke(enhanced_query)
-        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
-
-        # Generar la evaluación - Eliminamos variables no definidas
+        # Generar la evaluación
         evaluation_prompt = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"""
@@ -134,6 +141,9 @@ def create_evaluation_agent(llm, vectorstore):
 
             CONTEXTO CURRICULAR:
             {context}
+            
+            FUENTES CONSULTADAS:
+            {source_text}
 
             Por favor, genera una evaluación que:
             1. Se adapte al nivel y asignatura específicos

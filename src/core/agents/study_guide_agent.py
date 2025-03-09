@@ -1,7 +1,7 @@
 import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.rate_limiter import rate_limited_llm_call
-from core.vectorstore.retriever import create_enhanced_retriever_tool
+from core.vectorstore.retriever import retrieve_documents, get_context_from_documents
 
 def create_study_guide_agent(llm, vectorstore):
     """
@@ -82,16 +82,24 @@ def create_study_guide_agent(llm, vectorstore):
             return response, True, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
 
         # Si tenemos toda la información, generar la guía
-        enhanced_query = f"Crear guía de estudio para la asignatura de {asignatura} para el nivel {nivel} para el mes de {mes}"
+        enhanced_query = f"guía de estudio {asignatura} {nivel} {mes} conceptos clave ejemplos ejercicios actividades currículum"
 
-        # Buscar información relevante en el vectorstore
-        retriever = vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 5, "fetch_k": 10}
+        # Recopilar información de manera estratégica
+        # Priorizar bases curriculares, actividades y orientaciones
+        priority_categories = ["bases curriculares", "actividades sugeridas", "orientaciones", "propuesta"]
+        
+        # Utilizar retrieve_documents para obtener documentos relevantes
+        retrieved_docs = retrieve_documents(
+            vectorstore=vectorstore,
+            query=enhanced_query,
+            categories=priority_categories,
+            k=7
         )
-
-        retrieved_docs = retriever.invoke(enhanced_query)
-        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+        
+        # Extraer contexto de los documentos recuperados
+        context, sources = get_context_from_documents(retrieved_docs)
+        
+        source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
 
         # Generar la guía
         prompt = [
@@ -104,6 +112,13 @@ def create_study_guide_agent(llm, vectorstore):
 
             Contenidos y objetivos de aprendizaje relevantes:
             {context}
+            
+            Fuentes de información consultadas:
+            {source_text}
+            
+            Genera una guía de estudio completa basada en el currículum nacional chileno, 
+            adaptada al nivel educativo solicitado y que cubra los contenidos correspondientes
+            al mes indicado según la progresión del aprendizaje.
             """)
         ]
 

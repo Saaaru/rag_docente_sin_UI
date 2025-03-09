@@ -1,7 +1,7 @@
 import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.rate_limiter import rate_limited_llm_call
-from core.vectorstore.retriever import create_enhanced_retriever_tool
+from core.vectorstore.retriever import retrieve_documents, get_context_from_documents
 
 def create_planning_agent(llm, vectorstore):
     """
@@ -104,18 +104,23 @@ def create_planning_agent(llm, vectorstore):
             return response, True, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
 
         # Si tenemos toda la información, generar la planificación
-        enhanced_query = f"Crear planificación para la asignatura de {asignatura} para el nivel {nivel} para el mes de {mes}"
+        enhanced_query = f"Crear planificación curricular {asignatura} {nivel} {mes} objetivos aprendizaje contenidos habilidades actividades evaluación"
         
-        # Buscar información relevante en el vectorstore
-        retriever = vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 5, "fetch_k": 10}
+        # Buscar información relevante en la vectorstore con categorías prioritarias
+        priority_categories = ["bases curriculares", "orientaciones", "propuesta"]
+        retrieved_docs = retrieve_documents(
+            vectorstore=vectorstore,
+            query=enhanced_query,
+            categories=priority_categories,
+            k=7
         )
-
-        retrieved_docs = retriever.invoke(enhanced_query)
-        context = "\n\n".join([doc.page_content for doc in retrieved_docs])
-
-        # Generar la planificación - Eliminamos variables no definidas
+        
+        # Extraer contexto de los documentos recuperados
+        context, sources = get_context_from_documents(retrieved_docs)
+        
+        source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
+        
+        # Generar la planificación
         planning_prompt = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"""
@@ -126,6 +131,9 @@ def create_planning_agent(llm, vectorstore):
 
             CONTEXTO CURRICULAR:
             {context}
+
+            FUENTES CONSULTADAS:
+            {source_text}
 
             Por favor, genera una planificación educativa completa considerando:
             1. El nivel y asignatura específicos
