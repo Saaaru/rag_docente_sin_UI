@@ -1,43 +1,70 @@
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from utils.rate_limiter import rate_limited_llm_call
+from typing import List, Dict, Any, Optional
+from langchain_core.documents import Document
+from langchain_chroma import Chroma
 
-def retrieve_with_filter(vectorstore, query, category=None, k=5):
+def retrieve_with_filter(vectorstores: Dict[str, Chroma], 
+                        query: str, 
+                        categories: Optional[List[str]] = None,
+                        k: int = 5) -> List[Document]:
     """
-    Realiza una búsqueda en la vectorstore con filtro opcional por categoría.
+    Realiza una búsqueda en las colecciones especificadas.
     
     Args:
-        vectorstore: La base de datos vectorial de Chroma
+        vectorstores: Diccionario de vectorstores por categoría
         query: Consulta para buscar
-        category: Categoría para filtrar (opcional)
-        k: Número de documentos a recuperar
+        categories: Lista de categorías donde buscar (None = todas)
+        k: Número de documentos a recuperar por categoría
         
     Returns:
-        Lista de documentos relevantes
+        Lista combinada de documentos relevantes
     """
-    # Crear filtro si se especifica categoría
-    filter_dict = None
-    if category:
-        if isinstance(category, list):
-            filter_dict = {"category": {"$in": category}}
-        else:
-            filter_dict = {"category": {"$eq": category}}
+    if not vectorstores:
+        print("❌ No hay vectorstores disponibles")
+        return []
     
-    # Usar MMR para diversidad en resultados
-    return vectorstore.max_marginal_relevance_search(
-        query=query,
-        k=k,
-        fetch_k=k*2,  # Recuperar más para seleccionar los más diversos
-        lambda_mult=0.7,  # Balance entre relevancia (1.0) y diversidad (0.0)
-        filter=filter_dict
-    )
+    # Si no se especifican categorías, usar todas
+    categories = categories or list(vectorstores.keys())
+    
+    # Validar categorías solicitadas
+    valid_categories = [cat for cat in categories if cat in vectorstores]
+    if not valid_categories:
+        print("❌ No se encontraron categorías válidas para la búsqueda")
+        return []
+    
+    if len(valid_categories) < len(categories):
+        missing = set(categories) - set(valid_categories)
+        print(f"⚠️ Categorías no encontradas: {', '.join(missing)}")
+    
+    results = []
+    docs_per_category = max(1, k // len(valid_categories))
+    
+    # Realizar búsqueda en cada categoría
+    for category in valid_categories:
+        try:
+            category_results = vectorstores[category].max_marginal_relevance_search(
+                query=query,
+                k=docs_per_category,
+                fetch_k=docs_per_category*2,
+                lambda_mult=0.7
+            )
+            results.extend(category_results)
+            print(f"✅ {len(category_results)} documentos recuperados de {category}")
+        except Exception as e:
+            print(f"❌ Error al buscar en {category}: {e}")
+    
+    return results
 
-def retrieve_documents(vectorstore, query, categories=None, k=5):
+def retrieve_documents(vectorstores: Dict[str, Chroma], 
+                      query: str,
+                      categories: Optional[List[str]] = None,
+                      k: int = 5) -> List[Document]:
     """
-    Recupera documentos relevantes para una consulta de manera estratégica.
-    Prioriza documentos de diferentes categorías para obtener una visión completa.
+    Recupera documentos relevantes de manera estratégica entre las colecciones.
     
     Args:
-        vectorstore: La base de datos vectorial
+        vectorstores: Diccionario de vectorstores por categoría
         query: Consulta del usuario
         categories: Lista de categorías prioritarias (None = todas)
         k: Número total de documentos a recuperar
@@ -45,56 +72,57 @@ def retrieve_documents(vectorstore, query, categories=None, k=5):
     Returns:
         Lista combinada de documentos relevantes
     """
-    docs = []
+    if not vectorstores:
+        print("❌ No hay vectorstores disponibles")
+        return []
     
-    # Si no hay categorías específicas, hacer búsqueda general
+    # Si no hay categorías específicas, hacer búsqueda en todas
     if not categories:
-        docs = retrieve_with_filter(vectorstore, query, category=None, k=k)
-        return docs
+        return retrieve_with_filter(vectorstores, query, None, k)
     
-    # Distribuir la cantidad de documentos por categoría
-    docs_per_category = max(1, k // len(categories))
+    docs = []
     remaining = k
     
-    # Recuperar documentos de cada categoría prioritaria
-    for category in categories:
-        category_docs = retrieve_with_filter(
-            vectorstore, 
-            query, 
-            category=category, 
-            k=min(docs_per_category, remaining)
-        )
-        docs.extend(category_docs)
-        remaining -= len(category_docs)
-        
-        if remaining <= 0:
-            break
+    # Primero buscar en las categorías prioritarias
+    priority_results = retrieve_with_filter(
+        vectorstores,
+        query,
+        categories,
+        k=remaining
+    )
+    docs.extend(priority_results)
+    remaining -= len(priority_results)
     
-    # Si quedan slots disponibles, hacer una búsqueda general para complementar
+    # Si quedan slots y hay otras categorías disponibles, complementar
     if remaining > 0:
-        general_docs = retrieve_with_filter(vectorstore, query, category=None, k=remaining)
-        docs.extend(general_docs)
+        other_categories = [cat for cat in vectorstores.keys() if cat not in categories]
+        if other_categories:
+            additional_results = retrieve_with_filter(
+                vectorstores,
+                query,
+                other_categories,
+                k=remaining
+            )
+            docs.extend(additional_results)
     
     return docs
 
-def get_context_from_documents(docs, max_length=6000):
+def get_context_from_documents(docs: List[Document], max_length: int = 6000) -> tuple[str, List[str]]:
     """
-    Extrae el contenido de los documentos y lo convierte en un contexto utilizable.
+    Extrae el contenido de los documentos y lo convierte en contexto utilizable.
     
     Args:
         docs: Lista de documentos recuperados
         max_length: Longitud máxima del contexto
         
     Returns:
-        Texto de contexto y lista de fuentes
+        Tuple[str, List[str]]: (Texto de contexto, Lista de fuentes)
     """
     if not docs:
         return "", []
     
-    # Extraer contenido y metadata
     context_parts = []
     sources = []
-    
     current_length = 0
     
     for doc in docs:
@@ -103,22 +131,16 @@ def get_context_from_documents(docs, max_length=6000):
             context_parts.append(doc.page_content)
             current_length += len(doc.page_content)
             
-            # Registrar fuente si no está ya incluida
-            if "source" in doc.metadata:
-                source = doc.metadata["source"]
+            # Registrar fuente con categoría
+            if "source" in doc.metadata and "category" in doc.metadata:
+                source = f"{doc.metadata['category']}: {doc.metadata['source']}"
                 if source not in sources:
                     sources.append(source)
-                    
-            # Añadir categoría a la fuente
-            if "category" in doc.metadata:
-                source_with_category = f"{doc.metadata.get('category')}: {doc.metadata.get('source', 'desconocido')}"
-                if source_with_category not in sources:
-                    sources.append(source_with_category)
+            elif "source" in doc.metadata:
+                if doc.metadata["source"] not in sources:
+                    sources.append(doc.metadata["source"])
         else:
-            # Si excede el límite, parar
             break
     
-    # Unir las partes del contexto
     context = "\n\n".join(context_parts)
-    
     return context, sources 
