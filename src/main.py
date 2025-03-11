@@ -14,7 +14,7 @@ from core.agents import (
 from config import COLLECTION_NAME
 
 # Credenciales para usar VERTEX_AI
-credentials_path = r"C:/Users/Dante/Desktop/rag_docente_sin_UI-1/src/config/credentials/gen-lang-client-0115469242-239dc466873d.json"
+credentials_path = r"C:/Users/mfuen/OneDrive/Desktop/rag_docente_sin_UI-1/src/config/credentials/gen-lang-client-0115469242-239dc466873d.json"
 if not os.path.exists(credentials_path):
     raise FileNotFoundError(
         f"No se encontró el archivo de credenciales en: {credentials_path}")
@@ -45,8 +45,7 @@ def initialize_system():
         # Inicializar vectorstore
         vectorstore = initialize_vectorstore(
             pdf_directory=PDF_DIRECTORY,
-            persist_directory=PERSIST_DIRECTORY,
-            collection_name=COLLECTION_NAME
+            persist_directory=PERSIST_DIRECTORY
         )
         
         return llm, vectorstore, logger

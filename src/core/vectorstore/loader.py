@@ -6,12 +6,23 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader, Py
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_google_vertexai import VertexAIEmbeddings
+import json
+from datetime import datetime
 
 # Añadir el directorio src al path para importaciones relativas
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 if src_dir not in sys.path:
     sys.path.append(src_dir)
+
+# Añadir después de las importaciones
+COLLECTION_NAMES = {
+    "propuesta": "pdf-rag-propuesta",
+    "orientaciones": "pdf-rag-orientaciones",
+    "leyes": "pdf-rag-leyes",
+    "bases curriculares": "pdf-rag-bases-curriculares",
+    "actividades sugeridas": "pdf-rag-actividades-sugeridas"
+}
 
 def load_pdf_documents(directory_path: str) -> Dict[str, List]:
     """
@@ -93,7 +104,7 @@ def load_pdf_documents(directory_path: str) -> Dict[str, List]:
 
     return documents_by_category
 
-def process_documents(documents: Dict[str, List], chunk_size: int = 1500, chunk_overlap: int = 300) -> Dict[str, List]:
+def process_documents(documents: Dict[str, List], chunk_size: int = 1000, chunk_overlap: int = 150) -> Dict[str, List]:
     """
     Procesa documentos por categoría dividiéndolos en chunks.
     
@@ -129,24 +140,13 @@ def process_documents(documents: Dict[str, List], chunk_size: int = 1500, chunk_
     return processed_documents
 
 def create_vectorstore(documents: Dict[str, List], persist_directory: str) -> Dict[str, Chroma]:
-    """
-    Crea colecciones de Chroma para cada categoría de documentos.
-
-    Args:
-        documents: Diccionario de documentos por categoría
-        persist_directory: Directorio base donde guardar las colecciones
-
-    Returns:
-        Diccionario de vectorstores por categoría
-    """
-    # Asegurar que exista el directorio base
+    """Crea colecciones de Chroma para cada categoría de documentos."""
     os.makedirs(persist_directory, exist_ok=True)
-    
-    # Inicializar embeddings de VertexAI (se comparte entre todas las colecciones)
     embeddings = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
     print("✅ Embeddings inicializados")
 
     vectorstores = {}
+    BATCH_SIZE = 1000  # Procesar en lotes de 1000 documentos
     
     for category, docs in documents.items():
         if not docs:
@@ -154,79 +154,82 @@ def create_vectorstore(documents: Dict[str, List], persist_directory: str) -> Di
             
         print(f"\n📑 Procesando categoría: {category}")
         
-        # Crear directorio específico para la categoría
+        collection_name = COLLECTION_NAMES.get(category)
+        if not collection_name:
+            print(f"⚠️ Categoría no reconocida: {category}")
+            continue
+
         category_dir = os.path.join(persist_directory, category)
+        checkpoint_file = os.path.join(category_dir, "checkpoint.json")
         os.makedirs(category_dir, exist_ok=True)
         
-        # Definir archivos de la colección
-        collection_name = f"pdf-rag-{category}"
-        metadata_file = os.path.join(category_dir, "metadata.json")
+        # Verificar punto de control existente
+        processed_count = 0
+        if os.path.exists(checkpoint_file):
+            with open(checkpoint_file, 'r') as f:
+                checkpoint = json.load(f)
+                processed_count = checkpoint.get('processed_count', 0)
+                print(f"📍 Recuperando desde checkpoint: {processed_count} documentos procesados")
         
         try:
-            vectorstore = Chroma.from_documents(
-                documents=docs,
-                embedding=embeddings,
-                collection_name=collection_name,
-                persist_directory=category_dir
-            )
-            vectorstores[category] = vectorstore
-            print(f"✅ Vectorstore creado para {category} con {len(docs)} documentos")
-            print(f"   💾 Guardado en {category_dir}")
+            # Crear o cargar vectorstore existente
+            if processed_count == 0:
+                vectorstore = Chroma(
+                    persist_directory=category_dir,
+                    embedding_function=embeddings,
+                    collection_name=collection_name
+                )
+            else:
+                vectorstore = Chroma(
+                    persist_directory=category_dir,
+                    embedding_function=embeddings,
+                    collection_name=collection_name
+                )
             
-            # Guardar metadata de la colección
-            from datetime import datetime
-            metadata = {
-                "category": category,
-                "document_count": len(docs),
-                "created_at": datetime.now().isoformat(),
-                "collection_name": collection_name,
-                "directory": category_dir
-            }
+            # Procesar documentos restantes en lotes
+            remaining_docs = docs[processed_count:]
+            total_remaining = len(remaining_docs)
             
-            with open(metadata_file, 'w', encoding='utf-8') as f:
-                import json
-                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            if total_remaining > 0:
+                print(f"📦 Procesando {total_remaining} documentos restantes en lotes de {BATCH_SIZE}")
                 
+                for i in range(0, total_remaining, BATCH_SIZE):
+                    batch = remaining_docs[i:i + BATCH_SIZE]
+                    try:
+                        vectorstore.add_documents(batch)
+                        processed_count += len(batch)
+                        
+                        # Guardar checkpoint
+                        with open(checkpoint_file, 'w') as f:
+                            json.dump({
+                                'processed_count': processed_count,
+                                'last_update': datetime.now().isoformat()
+                            }, f)
+                        
+                        print(f"✅ Procesados {processed_count}/{len(docs)} documentos")
+                        
+                    except Exception as batch_error:
+                        print(f"⚠️ Error en lote {i//BATCH_SIZE + 1}: {batch_error}")
+                        continue
+            
+            vectorstores[category] = vectorstore
+            print(f"✅ Vectorstore completado para {category}")
+            
         except Exception as e:
-            print(f"❌ Error al crear vectorstore para {category}: {e}")
+            print(f"❌ Error al crear colección {category}: {e}")
     
     return vectorstores
 
-def initialize_vectorstore(pdf_directory: str, persist_directory: str) -> Dict[str, Chroma]:
+def validate_existing_collections(persist_directory: str, embeddings) -> Dict[str, Chroma]:
     """
-    Inicializa las colecciones de vectorstore: carga existentes o crea nuevas.
-    
-    Args:
-        pdf_directory: Directorio donde están los PDFs organizados por subcarpetas
-        persist_directory: Directorio base donde guardar/cargar las colecciones
-        
-    Returns:
-        Dict[str, Chroma]: Diccionario de vectorstores por categoría
+    Valida las colecciones existentes y retorna un diccionario con las que están correctamente cargadas.
     """
-    print("📚 Inicializando vectorstores...")
-    
-    # Asegurar que existan los directorios necesarios
-    os.makedirs(persist_directory, exist_ok=True)
-    
-    # Inicializar embeddings (se compartirá entre todas las colecciones)
-    embeddings = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
-    
     vectorstores = {}
-    expected_categories = ["propuesta", "orientaciones", "leyes", "bases curriculares", "actividades sugeridas"]
+    print("\n🔍 Validando colecciones existentes...")
     
-    # Crear estructura de directorios para vectorstores
-    for category in expected_categories:
+    for category, collection_name in COLLECTION_NAMES.items():
         category_dir = os.path.join(persist_directory, category)
-        os.makedirs(category_dir, exist_ok=True)
-    
-    # Intentar cargar colecciones existentes
-    for category in expected_categories:
-        category_dir = os.path.join(persist_directory, category)
-        collection_name = f"pdf-rag-{category}"
-        metadata_file = os.path.join(category_dir, "metadata.json")
-        
         if os.path.exists(category_dir):
-            print(f"\n📂 Intentando cargar colección existente para {category}...")
             try:
                 vectorstore = Chroma(
                     persist_directory=category_dir,
@@ -236,75 +239,78 @@ def initialize_vectorstore(pdf_directory: str, persist_directory: str) -> Dict[s
                 
                 # Verificar que tenga documentos
                 collection_size = len(vectorstore.get()['ids'])
-                if collection_size == 0:
-                    raise ValueError(f"La colección {category} existe pero está vacía")
-                    
+                if collection_size > 0:
+                    vectorstores[category] = vectorstore
+                    print(f"✅ Colección {category} validada: {collection_size} documentos")
+                else:
+                    print(f"⚠️ Colección {category} existe pero está vacía")
+            except Exception as e:
+                print(f"⚠️ Error al validar colección {category}: {e}")
+    
+    return vectorstores
+
+def initialize_vectorstore(pdf_directory: str, persist_directory: str) -> Dict[str, Chroma]:
+    """Inicializa las colecciones de vectorstore."""
+    print("📚 Inicializando vectorstores...")
+    
+    os.makedirs(persist_directory, exist_ok=True)
+    embeddings = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
+    
+    # Validar colecciones existentes
+    vectorstores = validate_existing_collections(persist_directory, embeddings)
+    
+    # Identificar categorías faltantes
+    missing_categories = set(COLLECTION_NAMES.keys()) - set(vectorstores.keys())
+    
+    if not missing_categories:
+        print("\n✨ Todas las colecciones están correctamente cargadas")
+        return vectorstores
+    
+    print(f"\n📝 Categorías pendientes de procesar: {', '.join(missing_categories)}")
+    
+    # Cargar y procesar documentos solo para las categorías faltantes
+    print("\n📄 Cargando documentos para colecciones faltantes...")
+    documents = load_pdf_documents(pdf_directory)
+    if not documents:
+        raise ValueError("No se encontraron documentos PDF para procesar")
+    
+    # Filtrar solo los documentos de categorías faltantes
+    documents_to_process = {k: v for k, v in documents.items() if k in missing_categories}
+    
+    # Procesar documentos
+    processed_docs = process_documents(documents_to_process)
+    
+    # Crear vectorstores faltantes
+    for category in missing_categories:
+        if category in processed_docs:
+            category_dir = os.path.join(persist_directory, category)
+            collection_name = COLLECTION_NAMES[category]
+            metadata_file = os.path.join(category_dir, "metadata.json")
+            
+            try:
+                vectorstore = Chroma.from_documents(
+                    documents=processed_docs[category],
+                    embedding=embeddings,
+                    collection_name=collection_name,
+                    persist_directory=category_dir
+                )
                 vectorstores[category] = vectorstore
-                print(f"✅ Colección {category} cargada con {collection_size} documentos")
+                print(f"✅ Nueva colección creada para {category}")
                 
-                # Guardar o actualizar metadata
-                from datetime import datetime
+                # Guardar metadata
                 metadata = {
                     "category": category,
-                    "document_count": collection_size,
-                    "last_loaded": datetime.now().isoformat(),
+                    "document_count": len(processed_docs[category]),
+                    "created_at": datetime.now().isoformat(),
                     "collection_name": collection_name,
                     "directory": category_dir
                 }
                 
                 with open(metadata_file, 'w', encoding='utf-8') as f:
-                    import json
                     json.dump(metadata, f, ensure_ascii=False, indent=2)
                 
             except Exception as e:
-                print(f"⚠️ Error al cargar colección {category}: {e}")
-                print(f"   Se creará una nueva colección para {category}")
-    
-    # Si faltan colecciones, crear nuevas
-    if len(vectorstores) < len(expected_categories):
-        print("\n📄 Cargando documentos para colecciones faltantes...")
-        
-        # Cargar documentos
-        documents = load_pdf_documents(pdf_directory)
-        if not documents:
-            raise ValueError("No se encontraron documentos PDF para procesar")
-        
-        # Procesar documentos
-        processed_docs = process_documents(documents)
-        
-        # Crear vectorstores faltantes
-        for category in expected_categories:
-            if category not in vectorstores and category in processed_docs:
-                category_dir = os.path.join(persist_directory, category)
-                collection_name = f"pdf-rag-{category}"
-                metadata_file = os.path.join(category_dir, "metadata.json")
-                
-                try:
-                    vectorstore = Chroma.from_documents(
-                        documents=processed_docs[category],
-                        embedding=embeddings,
-                        collection_name=collection_name,
-                        persist_directory=category_dir
-                    )
-                    vectorstores[category] = vectorstore
-                    print(f"✅ Nueva colección creada para {category}")
-                    
-                    # Guardar metadata de la nueva colección
-                    from datetime import datetime
-                    metadata = {
-                        "category": category,
-                        "document_count": len(processed_docs[category]),
-                        "created_at": datetime.now().isoformat(),
-                        "collection_name": collection_name,
-                        "directory": category_dir
-                    }
-                    
-                    with open(metadata_file, 'w', encoding='utf-8') as f:
-                        import json
-                        json.dump(metadata, f, ensure_ascii=False, indent=2)
-                    
-                except Exception as e:
-                    print(f"❌ Error al crear colección {category}: {e}")
+                print(f"❌ Error al crear colección {category}: {e}")
     
     return vectorstores
 

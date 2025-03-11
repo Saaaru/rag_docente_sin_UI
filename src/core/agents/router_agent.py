@@ -23,10 +23,21 @@ class RouterChatModel(BaseChatModel):
     """Modelo de chat personalizado para el router que interpreta las consultas de usuario."""
     
     def __init__(self, llm, logger):
+        """Initialize router chat model."""
         super().__init__()
-        self.llm = llm
-        self.logger = logger
+        self._llm = llm  # Cambiado de self.llm a self._llm
+        self._logger = logger
+    
+    @property
+    def llm(self):
+        """LLM property getter."""
+        return self._llm
         
+    @property
+    def logger(self):
+        """Logger property getter."""
+        return self._logger
+
     @property
     def _llm_type(self) -> str:
         return "router-chat-model"
