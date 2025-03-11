@@ -2,11 +2,16 @@ import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.rate_limiter import rate_limited_llm_call
 from core.vectorstore.retriever import retrieve_documents, get_context_from_documents
+from typing import Dict, Optional
+from langchain_chroma import Chroma
 
-def create_study_guide_agent(llm, vectorstore):
+def create_study_guide_agent(llm, vectorstores: Dict[str, Chroma]):
     """
     Crea un agente especializado en guías de estudio.
-    Verifica que tenga asignatura y nivel antes de generar contenido.
+    
+    Args:
+        llm: Modelo de lenguaje a utilizar
+        vectorstores: Diccionario de vectorstores por categoría
     """
     system_prompt = """Eres un agente especializado en CREAR GUÍAS DE ESTUDIO para el sistema educativo chileno.
 
@@ -34,7 +39,26 @@ def create_study_guide_agent(llm, vectorstore):
     Organiza la guía con títulos claros y formato amigable para estudiantes según su edad.
     """
 
-    def study_guide_agent_executor(query, asignatura=None, nivel=None, mes=None):
+    def study_guide_agent_executor(query: str,
+                                 asignatura: Optional[str] = None,
+                                 nivel: Optional[str] = None,
+                                 mes: Optional[str] = None):
+        """
+        Ejecuta el agente de guías de estudio.
+        
+        Args:
+            query: Consulta del usuario
+            asignatura: Asignatura objetivo
+            nivel: Nivel educativo
+            mes: Mes del año escolar
+        """
+        # Verificar que tengamos acceso a los vectorstores necesarios
+        required_categories = ["bases curriculares", "actividades sugeridas", "orientaciones", "propuesta"]
+        missing_categories = [cat for cat in required_categories if cat not in vectorstores]
+        if missing_categories:
+            return (f"⚠️ No se encontraron algunas categorías necesarias: {', '.join(missing_categories)}. "
+                   "Por favor, verifica la disponibilidad de los documentos.", False, None)
+
         # Verificar información faltante
         faltante = []
         if not asignatura:
@@ -81,48 +105,66 @@ def create_study_guide_agent(llm, vectorstore):
                 response += "- ¿Para qué nivel educativo? (Ej: 2° básico, 8° básico, 3° medio, etc.)\n"
             return response, True, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
 
-        # Si tenemos toda la información, generar la guía
-        enhanced_query = f"guía de estudio {asignatura} {nivel} {mes} conceptos clave ejemplos ejercicios actividades currículum"
+        try:
+            # Construir query enriquecida
+            enhanced_query = (
+                f"guía de estudio {asignatura} {nivel} {mes} "
+                f"conceptos clave ejemplos ejercicios actividades currículum"
+            )
 
-        # Recopilar información de manera estratégica
-        # Priorizar bases curriculares, actividades y orientaciones
-        priority_categories = ["bases curriculares", "actividades sugeridas", "orientaciones", "propuesta"]
-        
-        # Utilizar retrieve_documents para obtener documentos relevantes
-        retrieved_docs = retrieve_documents(
-            vectorstore=vectorstore,
-            query=enhanced_query,
-            categories=priority_categories,
-            k=7
-        )
-        
-        # Extraer contexto de los documentos recuperados
-        context, sources = get_context_from_documents(retrieved_docs)
-        
-        source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
-
-        # Generar la guía
-        prompt = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"""
-            Solicitud: {query}
-            Asignatura: {asignatura}
-            Nivel: {nivel}
-            Mes: {mes}
-
-            Contenidos y objetivos de aprendizaje relevantes:
-            {context}
+            # Definir prioridad de búsqueda por categorías
+            priority_categories = ["bases curriculares", "actividades sugeridas", "orientaciones", "propuesta"]
             
-            Fuentes de información consultadas:
-            {source_text}
+            print(f"\n🔍 Buscando información relevante en: {', '.join(priority_categories)}")
             
-            Genera una guía de estudio completa basada en el currículum nacional chileno, 
-            adaptada al nivel educativo solicitado y que cubra los contenidos correspondientes
-            al mes indicado según la progresión del aprendizaje.
-            """)
-        ]
+            # Recuperar documentos relevantes
+            retrieved_docs = retrieve_documents(
+                vectorstores=vectorstores,
+                query=enhanced_query,
+                categories=priority_categories,
+                k=7
+            )
 
-        response = rate_limited_llm_call(llm.invoke, prompt)
-        return response.content, False, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
+            if not retrieved_docs:
+                return ("No se encontró información suficiente en los documentos curriculares. "
+                       "Por favor, verifica los criterios de búsqueda.", False, None)
+
+            # Extraer contexto y fuentes
+            context, sources = get_context_from_documents(retrieved_docs)
+            source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
+
+            print(f"📚 Fuentes consultadas: {source_text}")
+
+            # Generar la guía
+            guide_prompt = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"""
+                SOLICITUD: {query}
+                ASIGNATURA: {asignatura}
+                NIVEL: {nivel}
+                MES: {mes}
+
+                CONTEXTO CURRICULAR:
+                {context}
+
+                FUENTES CONSULTADAS:
+                {source_text}
+
+                Por favor, genera una guía de estudio completa que:
+                1. Se adapte al nivel y asignatura específicos
+                2. Incluya conceptos clave y ejemplos claros
+                3. Proporcione ejercicios graduados por dificultad
+                4. Se alinee con el currículum nacional
+                5. Sea apropiada para el mes de {mes} en el calendario escolar
+                """)
+            ]
+
+            response = rate_limited_llm_call(llm.invoke, guide_prompt)
+            return response.content, False, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
+
+        except Exception as e:
+            print(f"❌ Error en study_guide_agent: {e}")
+            return ("Ocurrió un error al generar la guía de estudio. Por favor, intenta nuevamente.",
+                   False, None)
 
     return study_guide_agent_executor

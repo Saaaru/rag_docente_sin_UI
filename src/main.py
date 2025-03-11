@@ -1,29 +1,22 @@
 import os
 import uuid
 import logging
-from typing import List
 from core.llm import get_llm
-from core.embeddings import get_embeddings
 from core.vectorstore.loader import initialize_vectorstore
-from core.agents import (
-    create_planning_agent,
-    create_evaluation_agent,
-    create_study_guide_agent,
-    create_router_agent
-)
-from config import COLLECTION_NAME
+from core.agents import create_router_agent
 
 # Credenciales para usar VERTEX_AI
-credentials_path = r"C:/Users/mfuen/OneDrive/Desktop/rag_docente_sin_UI-1/src/config/credentials/gen-lang-client-0115469242-239dc466873d.json"
+credentials_path = r"C:/Users/Dante/Desktop/rag_docente_sin_UI-1/src/config/credentials/gen-lang-client-0115469242-239dc466873d.json"
 if not os.path.exists(credentials_path):
     raise FileNotFoundError(
         f"No se encontró el archivo de credenciales en: {credentials_path}")
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
 
-# Configuración de directorios y nombres de colección
-COLLECTION_NAME = "pdf-rag-chroma"
-PERSIST_DIRECTORY = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "processed", COLLECTION_NAME)
-PDF_DIRECTORY = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "raw", "pdf_docs")
+# Configuración de directorios
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+PDF_DIRECTORY = os.path.join(BASE_DIR, "data", "raw", "pdf_docs")
+PERSIST_DIRECTORY = os.path.join(BASE_DIR, "data", "processed", "vectorstores")
+
 def initialize_system():
     """Inicializa los componentes básicos del sistema."""
     print("\nInicializando Sistema Multi-Agente Educativo...")
@@ -38,43 +31,45 @@ def initialize_system():
         llm = get_llm()
         print("✅ LLM inicializado")
         
-        # Inicializar embeddings
-        embeddings = get_embeddings()
-        print("✅ Embeddings inicializados")
+        # Asegurar que existen los directorios necesarios
+        os.makedirs(PDF_DIRECTORY, exist_ok=True)
+        os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
         
-        # Inicializar vectorstore
-        vectorstore = initialize_vectorstore(
+        # Inicializar vectorstores
+        vectorstores = initialize_vectorstore(
             pdf_directory=PDF_DIRECTORY,
             persist_directory=PERSIST_DIRECTORY
         )
         
-        return llm, vectorstore, logger
+        if not vectorstores:
+            raise ValueError("No se pudo inicializar ninguna colección de vectorstore")
+        
+        # Mostrar resumen de colecciones
+        print("\n📊 Colecciones disponibles:")
+        for category, vs in vectorstores.items():
+            collection_size = len(vs.get()['ids'])
+            print(f"   - {category}: {collection_size} documentos")
+        
+        return llm, vectorstores, logger
         
     except Exception as e:
-        print(f"\n❌ Error fatal al inicializar el sistema: {str(e)}")
+        logger.error(f"Error fatal al inicializar el sistema: {str(e)}")
         raise e
 
 def main():
     """Punto de entrada principal del sistema."""
     try:
         # Inicializar componentes básicos
-        llm, vectorstore, logger = initialize_system()
+        llm, vectorstores, logger = initialize_system()
         
         # Generar ID de sesión
         thread_id = str(uuid.uuid4())[:8]
         logger.info(f"🔑 ID de sesión: {thread_id}")
 
-        # Crear agentes especializados
-        planning_agent = create_planning_agent(llm, vectorstore)
-        evaluation_agent = create_evaluation_agent(llm, vectorstore)
-        study_guide_agent = create_study_guide_agent(llm, vectorstore)
-
-        # Crear router agent
+        # Crear router agent con vectorstores
         router = create_router_agent(
             llm=llm,
-            planning_agent=planning_agent,
-            evaluation_agent=evaluation_agent,
-            study_guide_agent=study_guide_agent,
+            vectorstores=vectorstores,  # Pasar vectorstores directamente
             logger=logger,
             thread_id=thread_id
         )
@@ -86,7 +81,8 @@ def main():
             "asignatura": None,
             "nivel": None,
             "mes": None,
-            "tipo": None
+            "tipo": None,
+            "categorias": list(vectorstores.keys())
         }
 
         print("\n" + "=" * 50)
@@ -95,6 +91,9 @@ def main():
         print("1. PLANIFICACIONES educativas")
         print("2. EVALUACIONES")
         print("3. GUÍAS de estudio")
+        print("\nCategorías de documentos disponibles:")
+        for categoria in session_state["categorias"]:
+            print(f"- {categoria}")
         print("=" * 50 + "\n")
 
         # Loop principal de conversación

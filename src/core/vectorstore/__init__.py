@@ -1,8 +1,10 @@
 from .loader import (
-    load_pdf_documents, 
-    create_vectorstore, 
-    process_documents, 
-    initialize_vectorstore
+    initialize_vectorstore,
+    COLLECTION_NAMES,
+    EmbeddingsManager,
+    load_category_documents,
+    process_documents_in_batches,
+    create_category_vectorstore
 )
 from .retriever import (
     retrieve_documents, 
@@ -11,10 +13,12 @@ from .retriever import (
 )
 
 __all__ = [
-    'load_pdf_documents',
-    'create_vectorstore',
-    'process_documents',
     'initialize_vectorstore',
+    'COLLECTION_NAMES',
+    'EmbeddingsManager',
+    'load_category_documents',
+    'process_documents_in_batches',
+    'create_category_vectorstore',
     'retrieve_documents',
     'retrieve_with_filter',
     'get_context_from_documents'

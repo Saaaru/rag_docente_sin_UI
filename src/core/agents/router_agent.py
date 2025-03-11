@@ -1,20 +1,15 @@
 import datetime
-from typing import Optional
+from typing import Dict, Optional, List, Any
 from utils.conversation import format_and_save_conversation
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 from utils.rate_limiter import rate_limited_llm_call
-import json, re
-from typing import List
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    BaseMessage,
-    SystemMessage,
-)
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_chroma import Chroma
+import json
+import logging
 
-# Importar las *funciones de creación* de los agentes especializados
+# Importar las funciones de creación de los agentes especializados
 from core.agents.planning_agent import create_planning_agent
 from core.agents.evaluation_agent import create_evaluation_agent
 from core.agents.study_guide_agent import create_study_guide_agent
@@ -23,19 +18,16 @@ class RouterChatModel(BaseChatModel):
     """Modelo de chat personalizado para el router que interpreta las consultas de usuario."""
     
     def __init__(self, llm, logger):
-        """Initialize router chat model."""
         super().__init__()
-        self._llm = llm  # Cambiado de self.llm a self._llm
+        self._llm = llm
         self._logger = logger
     
     @property
     def llm(self):
-        """LLM property getter."""
         return self._llm
         
     @property
     def logger(self):
-        """Logger property getter."""
         return self._logger
 
     @property
@@ -61,52 +53,97 @@ class RouterChatModel(BaseChatModel):
         3. Si NO requiere agente especializado:
            - Determina si es una consulta general
            - Prepara una respuesta orientativa
-        
-        Responde en formato JSON estricto:
+
+        IMPORTANTE: DEBES responder SIEMPRE en formato JSON con esta estructura exacta:
         {
-            "requiere_agente": boolean,
-            "tipo_contenido": "PLANIFICACION|EVALUACION|GUIA|NINGUNO",
-            "asignatura": string | null,
-            "nivel": string | null,
-            "es_respuesta": boolean,
-            "respuesta_directa": string | null
-        }"""
+            "requiere_agente": false,
+            "tipo_contenido": "NINGUNO",
+            "asignatura": null,
+            "nivel": null,
+            "es_respuesta": false,
+            "respuesta_directa": "Mensaje apropiado para el usuario"
+        }
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            messages[-1]  # Solo usamos el último mensaje para la interpretación
-        ]
+        Para saludos o consultas generales, usa respuesta_directa con un mensaje amigable.
+        """
 
-        response = self.llm.invoke(messages)
-        
         try:
-            # Convertir la respuesta a JSON
-            content = response.content if isinstance(response, AIMessage) else str(response)
-            interpretation = json.loads(content)
+            # Asegurar que usamos el último mensaje
+            last_message = messages[-1].content if messages else ""
             
-            return ChatResult(generations=[
-                ChatGeneration(message=AIMessage(content=json.dumps(interpretation)))
-            ])
-        except Exception as e:
-            self.logger.error(f"Error interpretando respuesta del LLM: {e}")
-            return ChatResult(generations=[
-                ChatGeneration(message=AIMessage(content=json.dumps({
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=last_message)
+            ]
+
+            response = self.llm.invoke(messages)
+            content = response.content if isinstance(response, AIMessage) else str(response)
+            
+            # Intentar extraer JSON de la respuesta
+            try:
+                # Buscar el primer '{' y el último '}'
+                start = content.find('{')
+                end = content.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_str = content[start:end]
+                    interpretation = json.loads(json_str)
+                else:
+                    raise ValueError("No JSON found in response")
+            except:
+                # Si falla, crear respuesta por defecto
+                interpretation = {
                     "requiere_agente": False,
                     "tipo_contenido": "NINGUNO",
                     "asignatura": None,
                     "nivel": None,
                     "es_respuesta": False,
-                    "respuesta_directa": "No pude entender tu consulta. ¿Podrías reformularla?"
-                })))
+                    "respuesta_directa": "¡Hola! Soy tu asistente educativo. ¿En qué puedo ayudarte? Puedo crear planificaciones, evaluaciones o guías de estudio."
+                }
+
+            return ChatResult(generations=[
+                ChatGeneration(message=AIMessage(content=json.dumps(interpretation)))
             ])
 
-def create_router_agent(llm, planning_agent, evaluation_agent, study_guide_agent, logger, thread_id):
-    """Crea un agente router que utiliza el LLM para interpretar consultas."""
+        except Exception as e:
+            self.logger.error(f"Error en RouterChatModel: {str(e)}")
+            # Retornar respuesta por defecto en caso de error
+            default_response = {
+                "requiere_agente": False,
+                "tipo_contenido": "NINGUNO",
+                "asignatura": None,
+                "nivel": None,
+                "es_respuesta": False,
+                "respuesta_directa": "¡Hola! ¿Cómo puedo ayudarte? Puedo crear planificaciones, evaluaciones o guías de estudio."
+            }
+            return ChatResult(generations=[
+                ChatGeneration(message=AIMessage(content=json.dumps(default_response)))
+            ])
+
+def create_router_agent(llm, vectorstores: Dict[str, Chroma], logger: logging.Logger, thread_id: str):
+    """
+    Crea un agente router que coordina los agentes especializados.
     
+    Args:
+        llm: Modelo de lenguaje a utilizar
+        vectorstores: Diccionario de vectorstores por categoría
+        logger: Logger para registro de eventos
+        thread_id: Identificador único de la conversación
+    """
     router_chat = RouterChatModel(llm=llm, logger=logger)
     
-    def router(user_input: str, session_state: dict) -> str:
-        """Función principal del router."""
+    # Crear instancias de los agentes especializados
+    planning_agent = create_planning_agent(llm, vectorstores)
+    evaluation_agent = create_evaluation_agent(llm, vectorstores)
+    study_guide_agent = create_study_guide_agent(llm, vectorstores)
+    
+    def router(user_input: str, session_state: Dict[str, Any]) -> str:
+        """
+        Función principal del router.
+        
+        Args:
+            user_input: Consulta del usuario
+            session_state: Estado actual de la sesión
+        """
         logger.info(f"Procesando consulta: {user_input}")
 
         try:
@@ -129,7 +166,8 @@ def create_router_agent(llm, planning_agent, evaluation_agent, study_guide_agent
                     "asignatura": interpretation["asignatura"],
                     "nivel": interpretation["nivel"],
                     "mes": None,
-                    "tipo": interpretation["tipo_contenido"]
+                    "tipo": interpretation["tipo_contenido"],
+                    "categorias": list(vectorstores.keys())  # Añadir categorías disponibles
                 })
 
             # Actualizar información del estado si se proporciona
@@ -154,20 +192,32 @@ def create_router_agent(llm, planning_agent, evaluation_agent, study_guide_agent
                 session_state["mes"] = months[current_month - 1]
 
             # Seleccionar y llamar al agente apropiado
-            agent_to_use = {
+            agent_map = {
                 "PLANIFICACION": planning_agent,
                 "EVALUACION": evaluation_agent,
                 "GUIA": study_guide_agent
-            }.get(interpretation["tipo_contenido"], study_guide_agent)
+            }
+            
+            selected_agent = agent_map.get(interpretation["tipo_contenido"])
+            if not selected_agent:
+                logger.error(f"Tipo de contenido no válido: {interpretation['tipo_contenido']}")
+                return "Lo siento, no puedo procesar este tipo de solicitud."
 
-            response = agent_to_use(
+            logger.info(f"Ejecutando agente: {interpretation['tipo_contenido']}")
+            
+            response, needs_more_info, updated_state = selected_agent(
                 user_input,
                 session_state["asignatura"],
                 session_state["nivel"],
                 session_state["mes"]
             )
 
-            # Registrar la conversación
+            # Si el agente necesita más información
+            if needs_more_info:
+                session_state["pending_request"] = True
+                return response
+
+            # Registrar la conversación exitosa
             format_and_save_conversation(
                 f"{user_input} (Asignatura: {session_state['asignatura']}, "
                 f"Nivel: {session_state['nivel']}, Mes: {session_state['mes']})",
@@ -175,16 +225,11 @@ def create_router_agent(llm, planning_agent, evaluation_agent, study_guide_agent
                 thread_id
             )
 
-            # Limpiar el estado después de una respuesta exitosa
-            session_state.clear()
-            session_state.update({
-                "pending_request": False,
-                "last_query": "",
-                "asignatura": None,
-                "nivel": None,
-                "mes": None,
-                "tipo": None
-            })
+            # Actualizar el estado con la información del agente
+            if updated_state:
+                session_state.update(updated_state)
+                session_state["pending_request"] = False
+                session_state["last_query"] = ""
 
             return response
 

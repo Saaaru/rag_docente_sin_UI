@@ -8,6 +8,7 @@ from langchain_chroma import Chroma
 from langchain_google_vertexai import VertexAIEmbeddings
 import json
 from datetime import datetime
+from langchain.schema import Document
 
 # Añadir el directorio src al path para importaciones relativas
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -24,103 +25,129 @@ COLLECTION_NAMES = {
     "actividades sugeridas": "pdf-rag-actividades-sugeridas"
 }
 
-def load_pdf_documents(directory_path: str) -> Dict[str, List]:
-    """
-    Carga documentos PDF organizados por subcarpetas.
+class EmbeddingsManager:
+    """Singleton para gestionar una única instancia de embeddings."""
+    _instance = None
+    
+    @classmethod
+    def get_embeddings(cls):
+        if cls._instance is None:
+            cls._instance = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
+        return cls._instance
 
+def split_large_document(doc, max_tokens: int = 15000):
+    """
+    Divide un documento grande en secciones más manejables preservando el contexto.
+    
     Args:
-        directory_path: Ruta al directorio que contiene las subcarpetas con PDFs
-
-    Returns:
-        Dict con subcarpetas como claves y listas de documentos como valores
+        doc: Documento a dividir
+        max_tokens: Máximo de tokens por sección (estimado por caracteres)
     """
-    if not os.path.exists(directory_path):
-        print(f"❌ Directory {directory_path} does not exist.")
-        return {}
-
-    # Verificar que la ruta sea a la carpeta pdf_docs correcta
-    folder_name = os.path.basename(directory_path)
-    if folder_name != "pdf_docs":
-        print(f"⚠️ Aviso: El directorio no parece ser 'pdf_docs' sino '{folder_name}'")
+    # Estimamos 4 caracteres por token
+    max_chars = max_tokens * 4
+    content = doc.page_content
+    metadata = doc.metadata.copy()
     
-    # Subcarpetas esperadas
-    expected_subdirs = ["propuesta", "orientaciones", "leyes", "bases curriculares", "actividades sugeridas"]
-    documents_by_category = {subdir: [] for subdir in expected_subdirs}
+    # Intentar dividir por secciones naturales
+    sections = []
+    current_section = []
+    current_length = 0
     
-    # Verificar subcarpetas existentes
-    subdirs = [d for d in os.listdir(directory_path) if os.path.isdir(os.path.join(directory_path, d))]
-    found_subdirs = set(subdirs).intersection(set(expected_subdirs))
-    print(f"📂 Subcarpetas encontradas: {', '.join(found_subdirs)}")
+    # Dividir por párrafos
+    paragraphs = content.split('\n\n')
     
-    missing_subdirs = set(expected_subdirs) - set(subdirs)
-    if missing_subdirs:
-        print(f"⚠️ Subcarpetas no encontradas: {', '.join(missing_subdirs)}")
-
-    total_files = 0
-    processed_files = 0
-
-    # Contar total de archivos PDF por categoría
-    for category in found_subdirs:
-        category_path = os.path.join(directory_path, category)
-        for root, _, files in os.walk(category_path):
-            total_files += len([f for f in files if f.endswith('.pdf')])
-
-    print(f"\n📁 Encontrados {total_files} archivos PDF en total")
-
-    # Procesar archivos por categoría
-    for category in found_subdirs:
-        category_path = os.path.join(directory_path, category)
-        print(f"\n📂 Procesando categoría: {category}")
+    for i, paragraph in enumerate(paragraphs):
+        paragraph_length = len(paragraph)
         
-        for root, _, files in os.walk(category_path):
-            pdf_files = [f for f in files if f.endswith('.pdf')]
+        if current_length + paragraph_length > max_chars and current_section:
+            # Crear nueva sección con los párrafos acumulados
+            section_content = '\n\n'.join(current_section)
+            section_metadata = metadata.copy()
+            section_metadata['section'] = len(sections) + 1
+            section_metadata['total_sections'] = -1  # Se actualizará después
+            sections.append(Document(
+                page_content=section_content,
+                metadata=section_metadata
+            ))
             
-            for pdf_file in pdf_files:
+            # Reiniciar para nueva sección
+            current_section = []
+            current_length = 0
+        
+        current_section.append(paragraph)
+        current_length += paragraph_length
+    
+    # Añadir última sección si existe
+    if current_section:
+        section_content = '\n\n'.join(current_section)
+        section_metadata = metadata.copy()
+        section_metadata['section'] = len(sections) + 1
+        section_metadata['total_sections'] = -1
+        sections.append(Document(
+            page_content=section_content,
+            metadata=section_metadata
+        ))
+    
+    # Actualizar total de secciones en metadata
+    total_sections = len(sections)
+    for section in sections:
+        section.metadata['total_sections'] = total_sections
+    
+    return sections
+
+def load_category_documents(directory_path: str, category: str, batch_size: int = 100) -> List:
+    """
+    Carga y preprocesa documentos de una categoría específica.
+    """
+    category_path = os.path.join(directory_path, category)
+    if not os.path.exists(category_path):
+        print(f"❌ Directorio no encontrado para categoría {category}")
+        return []
+    
+    documents = []
+    total_files = len([f for f in os.listdir(category_path) if f.endswith('.pdf')])
+    print(f"\n📂 Procesando {total_files} archivos de {category}")
+    
+    for batch_start in range(0, total_files, batch_size):
+        batch_files = os.listdir(category_path)[batch_start:batch_start + batch_size]
+        batch_docs = []
+        
+        for pdf_file in batch_files:
+            if pdf_file.endswith('.pdf'):
                 try:
-                    file_path = os.path.join(root, pdf_file)
-                    print(f"  📄 Cargando: {pdf_file}")
+                    file_path = os.path.join(category_path, pdf_file)
                     loader = PyPDFLoader(file_path)
                     docs = loader.load()
                     
-                    # Añadir metadatos de categoría
+                    processed_docs = []
                     for doc in docs:
-                        doc.metadata["category"] = category
+                        # Estimar tokens
+                        estimated_tokens = len(doc.page_content) / 4
+                        
+                        if estimated_tokens > 15000:  # Si excede el límite
+                            print(f"  📑 Dividiendo documento grande: {pdf_file}")
+                            sections = split_large_document(doc)
+                            processed_docs.extend(sections)
+                        else:
+                            doc.metadata["category"] = category
+                            processed_docs.append(doc)
                     
-                    documents_by_category[category].extend(docs)
-                    processed_files += 1
-                    print(f"    ✅ {len(docs)} páginas cargadas")
+                    batch_docs.extend(processed_docs)
+                    print(f"  ✅ Cargado: {pdf_file} ({len(processed_docs)} secciones)")
+                    
                 except Exception as e:
-                    print(f"    ❌ Error al cargar {pdf_file}: {e}")
-
-    # Resumen final
-    print(f"\n📊 Resumen por categoría:")
-    for category, docs in documents_by_category.items():
-        if docs:
-            print(f"   - {category}: {len(docs)} páginas")
-    print(f"\n📊 Total:")
-    print(f"   - {processed_files}/{total_files} archivos procesados")
-    total_pages = sum(len(docs) for docs in documents_by_category.values())
-    print(f"   - {total_pages} páginas totales")
-
-    return documents_by_category
-
-def process_documents(documents: Dict[str, List], chunk_size: int = 1000, chunk_overlap: int = 150) -> Dict[str, List]:
-    """
-    Procesa documentos por categoría dividiéndolos en chunks.
-    
-    Args:
-        documents: Diccionario de documentos por categoría
-        chunk_size: Tamaño de cada chunk
-        chunk_overlap: Superposición entre chunks
+                    print(f"  ❌ Error en {pdf_file}: {e}")
         
-    Returns:
-        Diccionario de chunks procesados por categoría
-    """
-    if not documents:
-        print("❌ No hay documentos para procesar")
-        return {}
+        documents.extend(batch_docs)
+        print(f"  📦 Lote procesado: {len(batch_docs)} documentos")
     
-    processed_documents = {}
+    return documents
+
+def process_documents_in_batches(documents: List, chunk_size: int = 1000, 
+                               chunk_overlap: int = 200) -> List:
+    """
+    Procesa documentos manteniendo la integridad del contenido.
+    """
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -128,191 +155,257 @@ def process_documents(documents: Dict[str, List], chunk_size: int = 1000, chunk_
         length_function=len
     )
     
-    print(f"\n✂️ Dividiendo documentos en chunks (tamaño={chunk_size}, superposición={chunk_overlap})...")
+    processed_chunks = []
     
-    for category, docs in documents.items():
-        if docs:
-            print(f"   📑 Procesando {category}...")
-            chunks = text_splitter.split_documents(docs)
-            processed_documents[category] = chunks
-            print(f"      ✅ {len(docs)} documentos divididos en {len(chunks)} chunks")
-    
-    return processed_documents
-
-def create_vectorstore(documents: Dict[str, List], persist_directory: str) -> Dict[str, Chroma]:
-    """Crea colecciones de Chroma para cada categoría de documentos."""
-    os.makedirs(persist_directory, exist_ok=True)
-    embeddings = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
-    print("✅ Embeddings inicializados")
-
-    vectorstores = {}
-    BATCH_SIZE = 1000  # Procesar en lotes de 1000 documentos
-    
-    for category, docs in documents.items():
-        if not docs:
-            continue
-            
-        print(f"\n📑 Procesando categoría: {category}")
-        
-        collection_name = COLLECTION_NAMES.get(category)
-        if not collection_name:
-            print(f"⚠️ Categoría no reconocida: {category}")
-            continue
-
-        category_dir = os.path.join(persist_directory, category)
-        checkpoint_file = os.path.join(category_dir, "checkpoint.json")
-        os.makedirs(category_dir, exist_ok=True)
-        
-        # Verificar punto de control existente
-        processed_count = 0
-        if os.path.exists(checkpoint_file):
-            with open(checkpoint_file, 'r') as f:
-                checkpoint = json.load(f)
-                processed_count = checkpoint.get('processed_count', 0)
-                print(f"📍 Recuperando desde checkpoint: {processed_count} documentos procesados")
-        
+    # Procesar por secciones si el documento está dividido
+    for doc in documents:
         try:
-            # Crear o cargar vectorstore existente
-            if processed_count == 0:
-                vectorstore = Chroma(
-                    persist_directory=category_dir,
-                    embedding_function=embeddings,
-                    collection_name=collection_name
-                )
-            else:
-                vectorstore = Chroma(
-                    persist_directory=category_dir,
-                    embedding_function=embeddings,
-                    collection_name=collection_name
-                )
+            chunks = text_splitter.split_documents([doc])
             
-            # Procesar documentos restantes en lotes
-            remaining_docs = docs[processed_count:]
-            total_remaining = len(remaining_docs)
+            # Preservar información de sección en metadata
+            for chunk in chunks:
+                if 'section' in doc.metadata:
+                    chunk.metadata['section'] = doc.metadata['section']
+                    chunk.metadata['total_sections'] = doc.metadata['total_sections']
             
-            if total_remaining > 0:
-                print(f"📦 Procesando {total_remaining} documentos restantes en lotes de {BATCH_SIZE}")
-                
-                for i in range(0, total_remaining, BATCH_SIZE):
-                    batch = remaining_docs[i:i + BATCH_SIZE]
-                    try:
-                        vectorstore.add_documents(batch)
-                        processed_count += len(batch)
-                        
-                        # Guardar checkpoint
-                        with open(checkpoint_file, 'w') as f:
-                            json.dump({
-                                'processed_count': processed_count,
-                                'last_update': datetime.now().isoformat()
-                            }, f)
-                        
-                        print(f"✅ Procesados {processed_count}/{len(docs)} documentos")
-                        
-                    except Exception as batch_error:
-                        print(f"⚠️ Error en lote {i//BATCH_SIZE + 1}: {batch_error}")
-                        continue
-            
-            vectorstores[category] = vectorstore
-            print(f"✅ Vectorstore completado para {category}")
+            processed_chunks.extend(chunks)
             
         except Exception as e:
-            print(f"❌ Error al crear colección {category}: {e}")
+            print(f"  ⚠️ Error procesando documento: {e}")
+            continue
     
-    return vectorstores
+    print(f"  ✂️ Total chunks generados: {len(processed_chunks)}")
+    return processed_chunks
 
-def validate_existing_collections(persist_directory: str, embeddings) -> Dict[str, Chroma]:
+def create_category_vectorstore(chunks: List, category: str, embeddings, 
+                              persist_directory: str, batch_size: int = 1000) -> Optional[Chroma]:
     """
-    Valida las colecciones existentes y retorna un diccionario con las que están correctamente cargadas.
+    Crea o actualiza el vectorstore para una categoría específica.
     """
-    vectorstores = {}
-    print("\n🔍 Validando colecciones existentes...")
+    category_dir = os.path.join(persist_directory, category)
+    os.makedirs(category_dir, exist_ok=True)
+    collection_name = COLLECTION_NAMES.get(category)
+    checkpoint_file = os.path.join(category_dir, "checkpoint.json")
     
-    for category, collection_name in COLLECTION_NAMES.items():
-        category_dir = os.path.join(persist_directory, category)
-        if os.path.exists(category_dir):
+    try:
+        # Crear o cargar vectorstore existente
+        vectorstore = Chroma(
+            persist_directory=category_dir,
+            embedding_function=embeddings,
+            collection_name=collection_name
+        )
+        
+        # Procesar chunks en lotes
+        total_chunks = len(chunks)
+        for i in range(0, total_chunks, batch_size):
+            batch = chunks[i:i + batch_size]
+            vectorstore.add_documents(batch)
+            
+            # Actualizar checkpoint
+            with open(checkpoint_file, 'w') as f:
+                json.dump({
+                    'processed_chunks': i + len(batch),
+                    'total_chunks': total_chunks,
+                    'last_update': datetime.now().isoformat()
+                }, f)
+            
+            print(f"  💾 Guardado lote {i//batch_size + 1}: {len(batch)} chunks")
+        
+        return vectorstore
+        
+    except Exception as e:
+        print(f"❌ Error al procesar {category}: {e}")
+        return None
+
+def verify_collection_integrity(category_dir: str, collection_name: str, embeddings) -> Optional[Chroma]:
+    """
+    Verifica exhaustivamente la integridad de una colección Chroma existente.
+    """
+    try:
+        # 1. Verificar archivos básicos
+        required_base_files = ['chroma.sqlite3']
+        missing_base = [f for f in required_base_files 
+                       if not os.path.exists(os.path.join(category_dir, f))]
+        if missing_base:
+            print(f"  ⚠️ Faltan archivos base: {', '.join(missing_base)}")
+            return None
+
+        # 2. Verificar tamaño de la base de datos
+        db_size = os.path.getsize(os.path.join(category_dir, 'chroma.sqlite3'))
+        print(f"  📊 Tamaño de base de datos: {db_size/1024/1024:.2f} MB")
+        
+        if db_size < 1024:  # Menos de 1KB
+            print(f"  ⚠️ Base de datos demasiado pequeña")
+            return None
+
+        # 3. Intentar cargar y verificar la colección
+        try:
+            vectorstore = Chroma(
+                persist_directory=category_dir,
+                embedding_function=embeddings,
+                collection_name=collection_name
+            )
+            
+            # Verificar que tenga documentos
+            collection_data = vectorstore.get()
+            num_documents = len(collection_data['ids'])
+            
+            if num_documents == 0:
+                print(f"  ⚠️ Colección vacía")
+                return None
+            
+            # Realizar una búsqueda de prueba simple
             try:
-                vectorstore = Chroma(
-                    persist_directory=category_dir,
-                    embedding_function=embeddings,
-                    collection_name=collection_name
-                )
+                results = vectorstore.similarity_search("test", k=1)
+                print(f"  ✅ Colección funcional:")
+                print(f"     - Documentos: {num_documents}")
+                print(f"     - Búsqueda de prueba exitosa")
+                return vectorstore
                 
-                # Verificar que tenga documentos
-                collection_size = len(vectorstore.get()['ids'])
-                if collection_size > 0:
-                    vectorstores[category] = vectorstore
-                    print(f"✅ Colección {category} validada: {collection_size} documentos")
-                else:
-                    print(f"⚠️ Colección {category} existe pero está vacía")
             except Exception as e:
-                print(f"⚠️ Error al validar colección {category}: {e}")
-    
-    return vectorstores
+                print(f"  ⚠️ Error en búsqueda de prueba: {str(e)}")
+                return None
+
+        except Exception as e:
+            print(f"  ⚠️ Error accediendo a los datos: {str(e)}")
+            return None
+
+    except Exception as e:
+        print(f"  ⚠️ Error en verificación: {str(e)}")
+        return None
 
 def initialize_vectorstore(pdf_directory: str, persist_directory: str) -> Dict[str, Chroma]:
-    """Inicializa las colecciones de vectorstore."""
+    """
+    Inicializa las colecciones de vectorstore, priorizando colecciones existentes.
+    """
     print("📚 Inicializando vectorstores...")
     
-    os.makedirs(persist_directory, exist_ok=True)
-    embeddings = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
+    embeddings = EmbeddingsManager.get_embeddings()
+    vectorstores = {}
     
-    # Validar colecciones existentes
-    vectorstores = validate_existing_collections(persist_directory, embeddings)
+    # Verificar estructura del directorio de persistencia
+    if not os.path.exists(persist_directory):
+        print(f"⚠️ Directorio de persistencia no existe: {persist_directory}")
+        os.makedirs(persist_directory, exist_ok=True)
     
-    # Identificar categorías faltantes
-    missing_categories = set(COLLECTION_NAMES.keys()) - set(vectorstores.keys())
-    
-    if not missing_categories:
-        print("\n✨ Todas las colecciones están correctamente cargadas")
-        return vectorstores
-    
-    print(f"\n📝 Categorías pendientes de procesar: {', '.join(missing_categories)}")
-    
-    # Cargar y procesar documentos solo para las categorías faltantes
-    print("\n📄 Cargando documentos para colecciones faltantes...")
-    documents = load_pdf_documents(pdf_directory)
-    if not documents:
-        raise ValueError("No se encontraron documentos PDF para procesar")
-    
-    # Filtrar solo los documentos de categorías faltantes
-    documents_to_process = {k: v for k, v in documents.items() if k in missing_categories}
-    
-    # Procesar documentos
-    processed_docs = process_documents(documents_to_process)
-    
-    # Crear vectorstores faltantes
-    for category in missing_categories:
-        if category in processed_docs:
-            category_dir = os.path.join(persist_directory, category)
-            collection_name = COLLECTION_NAMES[category]
-            metadata_file = os.path.join(category_dir, "metadata.json")
+    # Primero, intentar cargar todas las colecciones existentes
+    for category in COLLECTION_NAMES:
+        category_dir = os.path.join(persist_directory, category)
+        collection_name = COLLECTION_NAMES[category]
+        
+        print(f"\n🔍 Verificando colección: {category}")
+        
+        if os.path.exists(category_dir):
+            print(f"  📂 Encontrado directorio: {category_dir}")
             
-            try:
-                vectorstore = Chroma.from_documents(
-                    documents=processed_docs[category],
-                    embedding=embeddings,
-                    collection_name=collection_name,
-                    persist_directory=category_dir
-                )
+            if vectorstore := verify_collection_integrity(
+                category_dir, collection_name, embeddings
+            ):
                 vectorstores[category] = vectorstore
-                print(f"✅ Nueva colección creada para {category}")
-                
-                # Guardar metadata
-                metadata = {
-                    "category": category,
-                    "document_count": len(processed_docs[category]),
-                    "created_at": datetime.now().isoformat(),
-                    "collection_name": collection_name,
-                    "directory": category_dir
-                }
-                
-                with open(metadata_file, 'w', encoding='utf-8') as f:
-                    json.dump(metadata, f, ensure_ascii=False, indent=2)
-                
-            except Exception as e:
-                print(f"❌ Error al crear colección {category}: {e}")
+                print(f"✅ Colección cargada exitosamente: {category}")
+                continue
+            else:
+                print(f"⚠️ Se encontró directorio pero la colección no es válida: {category}")
+                user_input = input(f"   ❓ ¿Desea intentar recrear esta colección? (s/n): ").lower()
+                if user_input != 's':
+                    print(f"   ⏩ Saltando recreación de: {category}")
+                    continue
+        else:
+            print(f"  📂 No se encontró directorio para: {category}")
+            user_input = input(f"   ❓ ¿Desea crear nueva colección para '{category}'? (s/n): ").lower()
+            if user_input != 's':
+                print(f"   ⏩ Saltando creación de: {category}")
+                continue
+        
+        # Crear nueva colección solo si es necesario y el usuario lo aprueba
+        print(f"\n🔄 Iniciando creación de colección: {category}")
+        try:
+            documents = load_category_documents(pdf_directory, category)
+            if not documents:
+                print(f"⚠️ No hay documentos para procesar en: {category}")
+                continue
+            
+            chunks = process_documents_in_batches(documents)
+            print(f"✅ Generados {len(chunks)} chunks")
+            
+            del documents
+            
+            if vectorstore := create_category_vectorstore(
+                chunks, category, embeddings, persist_directory
+            ):
+                vectorstores[category] = vectorstore
+                print(f"✅ Nueva colección creada exitosamente: {category}")
+            
+            del chunks
+            
+        except Exception as e:
+            print(f"❌ Error procesando {category}: {e}")
+            continue
+    
+    # Resumen final detallado
+    if vectorstores:
+        print("\n📊 Resumen de colecciones disponibles:")
+        for category, vs in vectorstores.items():
+            collection_size = len(vs.get()['ids'])
+            print(f"   - {category}: {collection_size} documentos")
+    else:
+        print("\n⚠️ No se pudo cargar ninguna colección")
     
     return vectorstores
+
+def diagnose_collection(category_dir: str) -> None:
+    """
+    Realiza un diagnóstico detallado de una colección existente.
+    """
+    print(f"\n🔍 Diagnóstico de colección en: {category_dir}")
+    
+    try:
+        # 1. Verificar estructura básica
+        print("\n1. Estructura de archivos:")
+        if os.path.exists(os.path.join(category_dir, 'chroma.sqlite3')):
+            size_mb = os.path.getsize(os.path.join(category_dir, 'chroma.sqlite3')) / 1024 / 1024
+            print(f"  ✅ chroma.sqlite3 encontrado ({size_mb:.2f} MB)")
+        else:
+            print("  ❌ chroma.sqlite3 no encontrado")
+
+        # 2. Verificar directorios de índice
+        print("\n2. Directorios de índice:")
+        index_dirs = [d for d in os.listdir(category_dir) 
+                     if os.path.isdir(os.path.join(category_dir, d))]
+        for idx_dir in index_dirs:
+            if len(idx_dir) == 36:  # UUID length
+                print(f"  ✅ Directorio de índice encontrado: {idx_dir}")
+                idx_path = os.path.join(category_dir, idx_dir)
+                print("    Archivos en el directorio:")
+                for f in os.listdir(idx_path):
+                    size_kb = os.path.getsize(os.path.join(idx_path, f)) / 1024
+                    print(f"    - {f} ({size_kb:.2f} KB)")
+
+        # 3. Verificar archivo de checkpoint
+        print("\n3. Archivo de checkpoint:")
+        checkpoint_path = os.path.join(category_dir, "checkpoint.json")
+        if os.path.exists(checkpoint_path):
+            with open(checkpoint_path, 'r') as f:
+                checkpoint_data = json.load(f)
+                print(f"  ✅ Checkpoint encontrado:")
+                print(f"    - Chunks procesados: {checkpoint_data.get('processed_chunks')}")
+                print(f"    - Total chunks: {checkpoint_data.get('total_chunks')}")
+                print(f"    - Última actualización: {checkpoint_data.get('last_update')}")
+        else:
+            print("  ⚠️ No se encontró archivo de checkpoint")
+
+    except Exception as e:
+        print(f"\n❌ Error durante el diagnóstico: {str(e)}")
+
+# Puedes usar esta función así:
+def diagnose_all_collections(base_dir: str) -> None:
+    """
+    Diagnostica todas las colecciones en el directorio base.
+    """
+    for category in COLLECTION_NAMES:
+        category_dir = os.path.join(base_dir, category)
+        if os.path.exists(category_dir):
+            diagnose_collection(category_dir)
 
 def main():
     """Función principal para cargar PDFs y crear vectorstore."""

@@ -2,13 +2,16 @@ import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.rate_limiter import rate_limited_llm_call
 from core.vectorstore.retriever import retrieve_documents, get_context_from_documents
+from typing import Dict, Optional
+from langchain_chroma import Chroma
 
-def create_planning_agent(llm, vectorstore):
+def create_planning_agent(llm, vectorstores: Dict[str, Chroma]):
     """
-    Crea un agente especializado en planificaciones educativas que considera:
-    1. El contexto mensual chileno (fechas importantes, eventos, clima, etc.)
-    2. Progresión ascendente del aprendizaje durante el año
-    3. Adaptación al nivel y asignatura específicos
+    Crea un agente especializado en planificaciones educativas.
+    
+    Args:
+        llm: Modelo de lenguaje a utilizar
+        vectorstores: Diccionario de vectorstores por categoría
     """
     system_prompt = """Eres un experto en planificación educativa chilena. Tu tarea es crear planificaciones que:
 
@@ -39,7 +42,7 @@ def create_planning_agent(llm, vectorstore):
        - Contenidos y habilidades (entre 3 a 5)
        - Actividades sugeridas (mínimo 3)
        - Evaluación formativa
-       - Recursos necesarios, obten la información de los libros de texto.
+       - Recursos necesarios
        - Adecuaciones según contexto mensual
 
     4. CONSIDERACIONES:
@@ -58,17 +61,35 @@ def create_planning_agent(llm, vectorstore):
     - Considera el clima, estación del año, eventos relevantes del calendario escolar.
     """
 
-    def planning_agent_executor(query, asignatura=None, nivel=None, mes=None):
+    def planning_agent_executor(query: str, 
+                              asignatura: Optional[str] = None, 
+                              nivel: Optional[str] = None, 
+                              mes: Optional[str] = None):
+        """
+        Ejecuta el agente de planificación.
+        
+        Args:
+            query: Consulta del usuario
+            asignatura: Asignatura objetivo
+            nivel: Nivel educativo
+            mes: Mes del año escolar
+        """
+        # Verificar que tengamos acceso a los vectorstores necesarios
+        required_categories = ["bases curriculares", "orientaciones", "propuesta"]
+        missing_categories = [cat for cat in required_categories if cat not in vectorstores]
+        if missing_categories:
+            return (f"⚠️ No se encontraron algunas categorías necesarias: {', '.join(missing_categories)}. "
+                   "Por favor, verifica la disponibilidad de los documentos.", False, None)
+
         # Verificar información faltante
         faltante = []
         if not asignatura:
             extract_prompt = [
                 SystemMessage(
-                    content="Extrae la asignatura mencionada en esta solicitud. Si no hay ninguna, solicita nuevamente la información completa."),
+                    content="Extrae la asignatura mencionada en esta solicitud. Si no hay ninguna, responde 'No especificada'."),
                 HumanMessage(content=query)
             ]
-            asignatura_result = rate_limited_llm_call(
-                llm.invoke, extract_prompt)
+            asignatura_result = rate_limited_llm_call(llm.invoke, extract_prompt)
             if "No especificada" in asignatura_result.content:
                 faltante.append("asignatura")
             else:
@@ -77,7 +98,7 @@ def create_planning_agent(llm, vectorstore):
         if not nivel:
             extract_prompt = [
                 SystemMessage(
-                    content="Extrae el nivel educativo mencionado en esta solicitud (ej: 5° básico, 2° medio). Si no hay ninguna, solicita nuevamente la información completa."),
+                    content="Extrae el nivel educativo mencionado en esta solicitud (ej: 5° básico, 2° medio). Si no hay ninguno, responde 'No especificado'."),
                 HumanMessage(content=query)
             ]
             nivel_result = rate_limited_llm_call(llm.invoke, extract_prompt)
@@ -103,48 +124,66 @@ def create_planning_agent(llm, vectorstore):
                 response += "- ¿Para qué nivel educativo? (Ej: 2° básico, 8° básico, 3° medio, etc.)\n"
             return response, True, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
 
-        # Si tenemos toda la información, generar la planificación
-        enhanced_query = f"Crear planificación curricular {asignatura} {nivel} {mes} objetivos aprendizaje contenidos habilidades actividades evaluación"
-        
-        # Buscar información relevante en la vectorstore con categorías prioritarias
-        priority_categories = ["bases curriculares", "orientaciones", "propuesta"]
-        retrieved_docs = retrieve_documents(
-            vectorstore=vectorstore,
-            query=enhanced_query,
-            categories=priority_categories,
-            k=7
-        )
-        
-        # Extraer contexto de los documentos recuperados
-        context, sources = get_context_from_documents(retrieved_docs)
-        
-        source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
-        
-        # Generar la planificación
-        planning_prompt = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"""
-            SOLICITUD: {query}
-            ASIGNATURA: {asignatura}
-            NIVEL: {nivel}
-            MES: {mes}
+        try:
+            # Construir query enriquecida
+            enhanced_query = (
+                f"planificación curricular {asignatura} {nivel} {mes} "
+                f"objetivos aprendizaje contenidos habilidades actividades evaluación"
+            )
 
-            CONTEXTO CURRICULAR:
-            {context}
+            # Definir prioridad de búsqueda por categorías
+            priority_categories = ["bases curriculares", "orientaciones", "propuesta"]
+            
+            print(f"\n🔍 Buscando información relevante en: {', '.join(priority_categories)}")
+            
+            # Recuperar documentos relevantes
+            retrieved_docs = retrieve_documents(
+                vectorstores=vectorstores,
+                query=enhanced_query,
+                categories=priority_categories,
+                k=7
+            )
 
-            FUENTES CONSULTADAS:
-            {source_text}
+            if not retrieved_docs:
+                return ("No se encontró información suficiente en los documentos curriculares. "
+                       "Por favor, verifica los criterios de búsqueda.", False, None)
 
-            Por favor, genera una planificación educativa completa considerando:
-            1. El nivel y asignatura específicos
-            2. El contexto curricular proporcionado
-            3. La progresión del aprendizaje
-            4. El contexto educativo chileno
-            5. El mes específico: {mes}
-            """)
-        ]
+            # Extraer contexto y fuentes
+            context, sources = get_context_from_documents(retrieved_docs)
+            source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
 
-        response = rate_limited_llm_call(llm.invoke, planning_prompt)
-        return response.content, False, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
+            print(f"📚 Fuentes consultadas: {source_text}")
+
+            # Generar la planificación
+            planning_prompt = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"""
+                SOLICITUD: {query}
+                ASIGNATURA: {asignatura}
+                NIVEL: {nivel}
+                MES: {mes}
+
+                CONTEXTO CURRICULAR:
+                {context}
+
+                FUENTES CONSULTADAS:
+                {source_text}
+
+                Por favor, genera una planificación educativa completa considerando:
+                1. El nivel y asignatura específicos
+                2. El contexto curricular proporcionado
+                3. La progresión del aprendizaje
+                4. El contexto educativo chileno
+                5. El mes específico: {mes}
+                """)
+            ]
+
+            response = rate_limited_llm_call(llm.invoke, planning_prompt)
+            return response.content, False, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
+
+        except Exception as e:
+            print(f"❌ Error en planning_agent: {e}")
+            return ("Ocurrió un error al generar la planificación. Por favor, intenta nuevamente.", 
+                   False, None)
 
     return planning_agent_executor

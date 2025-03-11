@@ -2,8 +2,10 @@ import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.rate_limiter import rate_limited_llm_call
 from core.vectorstore.retriever import retrieve_documents, get_context_from_documents
+from typing import Dict, Optional
+from langchain_chroma import Chroma
 
-def create_evaluation_agent(llm, vectorstore):
+def create_evaluation_agent(llm, vectorstores: Dict[str, Chroma]):
     """
     Crea un agente especializado en evaluaciones educativas que:
     1. Prioriza los criterios especificados por el usuario
@@ -64,7 +66,26 @@ def create_evaluation_agent(llm, vectorstore):
     - Si la evaluación es para meses específicos, RESPETAR LA PROGRESIÓN DEL APRENDIZAJE
     """
 
-    def evaluation_agent_executor(query, asignatura=None, nivel=None, mes=None):
+    def evaluation_agent_executor(query: str,
+                                asignatura: Optional[str] = None,
+                                nivel: Optional[str] = None,
+                                mes: Optional[str] = None):
+        """
+        Ejecuta el agente de evaluación.
+        
+        Args:
+            query: Consulta del usuario
+            asignatura: Asignatura objetivo
+            nivel: Nivel educativo
+            mes: Mes del año escolar
+        """
+        # Verificar que tengamos acceso a los vectorstores necesarios
+        required_categories = ["bases curriculares", "orientaciones", "propuesta", "actividades sugeridas"]
+        missing_categories = [cat for cat in required_categories if cat not in vectorstores]
+        if missing_categories:
+            return (f"⚠️ No se encontraron algunas categorías necesarias: {', '.join(missing_categories)}. "
+                   "Por favor, verifica la disponibilidad de los documentos.", False, None)
+
         # Verificar información faltante
         faltante = []
         if not asignatura:
@@ -111,50 +132,66 @@ def create_evaluation_agent(llm, vectorstore):
                 response += "- ¿Para qué nivel educativo? (Ej: 2° básico, 8° básico, 3° medio, etc.)\n"
             return response, True, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
 
-        # Si tenemos toda la información, generar la evaluación
-        enhanced_query = f"evaluación {asignatura} {nivel} {mes} objetivos aprendizaje indicadores logro contenidos preguntas instrumento evaluación"
+        try:
+            # Construir query enriquecida
+            enhanced_query = (
+                f"evaluación {asignatura} {nivel} {mes} "
+                f"objetivos aprendizaje indicadores logro contenidos preguntas instrumento evaluación"
+            )
 
-        # Buscar información relevante de manera estratégica
-        priority_categories = ["bases curriculares", "orientaciones", "propuesta", "actividades sugeridas"]
-        
-        # Utilizar retrieve_documents para obtener documentos relevantes
-        retrieved_docs = retrieve_documents(
-            vectorstore=vectorstore,
-            query=enhanced_query,
-            categories=priority_categories,
-            k=7
-        )
-        
-        # Extraer contexto de los documentos recuperados
-        context, sources = get_context_from_documents(retrieved_docs)
-        
-        source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
-
-        # Generar la evaluación
-        evaluation_prompt = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"""
-            SOLICITUD: {query}
-            ASIGNATURA: {asignatura}
-            NIVEL: {nivel}
-            MES: {mes}
-
-            CONTEXTO CURRICULAR:
-            {context}
+            # Definir prioridad de búsqueda por categorías
+            priority_categories = ["bases curriculares", "orientaciones", "propuesta", "actividades sugeridas"]
             
-            FUENTES CONSULTADAS:
-            {source_text}
+            print(f"\n🔍 Buscando información relevante en: {', '.join(priority_categories)}")
+            
+            # Recuperar documentos relevantes
+            retrieved_docs = retrieve_documents(
+                vectorstores=vectorstores,
+                query=enhanced_query,
+                categories=priority_categories,
+                k=7
+            )
 
-            Por favor, genera una evaluación que:
-            1. Se adapte al nivel y asignatura específicos
-            2. Use la configuración por defecto para aspectos no especificados
-            3. Se alinee con el currículum nacional
-            4. Incluya instrucciones claras y rúbricas de evaluación
-            5. Sea apropiada para el mes de {mes} en el calendario escolar
-            """)
-        ]
+            if not retrieved_docs:
+                return ("No se encontró información suficiente en los documentos curriculares. "
+                       "Por favor, verifica los criterios de búsqueda.", False, None)
 
-        response = rate_limited_llm_call(llm.invoke, evaluation_prompt)
-        return response.content, False, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
+            # Extraer contexto y fuentes
+            context, sources = get_context_from_documents(retrieved_docs)
+            source_text = ", ".join(sources) if sources else "documentos curriculares disponibles"
+
+            print(f"📚 Fuentes consultadas: {source_text}")
+
+            # Generar la evaluación
+            evaluation_prompt = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"""
+                SOLICITUD: {query}
+                ASIGNATURA: {asignatura}
+                NIVEL: {nivel}
+                MES: {mes}
+
+                CONTEXTO CURRICULAR:
+                {context}
+
+                FUENTES CONSULTADAS:
+                {source_text}
+
+                Por favor, genera una evaluación que:
+                1. Se adapte al nivel y asignatura específicos
+                2. Use la configuración por defecto para aspectos no especificados
+                3. Se alinee con el currículum nacional
+                4. Incluya instrucciones claras y rúbricas de evaluación
+                5. Sea apropiada para el mes de {mes} en el calendario escolar
+                """)
+            ]
+
+            response = rate_limited_llm_call(llm.invoke, evaluation_prompt)
+            return response.content, False, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
+
+        except Exception as e:
+            print(f"❌ Error en evaluation_agent: {e}")
+            return ("Ocurrió un error al generar la evaluación. Por favor, intenta nuevamente.",
+                   False, None)
 
     return evaluation_agent_executor
