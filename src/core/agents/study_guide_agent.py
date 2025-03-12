@@ -91,11 +91,21 @@ def create_study_guide_agent(llm, vectorstores: Dict[str, Chroma]):
                 
         # Si no se ha especificado un mes, usamos el mes actual
         if not mes:
-            meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", 
-                    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
-            mes_actual = datetime.datetime.now().month
-            mes = meses[mes_actual - 1]
-            print(f"\n📅 Usando mes actual para guía de estudio: {mes}")
+            extract_mes_prompt = [
+                SystemMessage(
+                    content="Extrae el mes del año escolar mencionado en esta solicitud. Si no se especifica, responde 'No especificado'."
+                ),
+                HumanMessage(content=query)
+            ]
+            mes_result = rate_limited_llm_call(llm.invoke, extract_mes_prompt)
+            if "No especificado" in mes_result.content:
+                meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+                          "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+                mes_actual = datetime.datetime.now().month
+                mes = meses[mes_actual - 1]
+                print(f"\n📅 Usando mes actual para guía de estudio: {mes}")
+            else:
+                mes = mes_result.content.strip()
 
         # Si falta información, solicitarla
         if faltante:
