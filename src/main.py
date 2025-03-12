@@ -1,12 +1,16 @@
 import os
 import uuid
 import logging
+from fastapi import FastAPI
 from core.llm import get_llm
 from core.vectorstore.loader import initialize_vectorstore
-from core.agents import create_router_agent
+from core.agents.router_agent import create_router_agent
+
+# Importar el router de chat
+from api.routes.chat import router as chat_router
 
 # Credenciales para usar VERTEX_AI
-credentials_path = r"C:/Users/Dante/Desktop/rag_docente_sin_UI-1/src/config/credentials/gen-lang-client-0115469242-239dc466873d.json"
+credentials_path = r"C:/Users/Dante/Desktop/rag_docente_sin_UI-1/src/config/credentials/appdocente-453515-41ddf072f3e5.json"
 if not os.path.exists(credentials_path):
     raise FileNotFoundError(
         f"No se encontró el archivo de credenciales en: {credentials_path}")
@@ -31,7 +35,7 @@ def initialize_system():
         llm = get_llm()
         print("✅ LLM inicializado")
         
-        # Asegurar que existen los directorios necesarios
+        # Asegurar que existan los directorios necesarios
         os.makedirs(PDF_DIRECTORY, exist_ok=True)
         os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
         
@@ -57,7 +61,7 @@ def initialize_system():
         raise e
 
 def main():
-    """Punto de entrada principal del sistema."""
+    """Punto de entrada principal del sistema en modo consola."""
     try:
         # Inicializar componentes básicos
         llm, vectorstores, logger = initialize_system()
@@ -67,23 +71,12 @@ def main():
         logger.info(f"🔑 ID de sesión: {thread_id}")
 
         # Crear router agent con vectorstores
-        router = create_router_agent(
+        router_agent = create_router_agent(
             llm=llm,
-            vectorstores=vectorstores,  # Pasar vectorstores directamente
+            vectorstores=vectorstores,
             logger=logger,
             thread_id=thread_id
         )
-
-        # Estado inicial de la sesión
-        session_state = {
-            "pending_request": False,
-            "last_query": "",
-            "asignatura": None,
-            "nivel": None,
-            "mes": None,
-            "tipo": None,
-            "categorias": list(vectorstores.keys())
-        }
 
         print("\n" + "=" * 50)
         print("🎯 Sistema listo para procesar solicitudes!")
@@ -92,11 +85,11 @@ def main():
         print("2. EVALUACIONES")
         print("3. GUÍAS de estudio")
         print("\nCategorías de documentos disponibles:")
-        for categoria in session_state["categorias"]:
+        for categoria in vectorstores.keys():
             print(f"- {categoria}")
         print("=" * 50 + "\n")
 
-        # Loop principal de conversación
+        # Loop principal de conversación en modo consola
         while True:
             try:
                 user_input = input("👤 Usuario: ").strip()
@@ -104,7 +97,7 @@ def main():
                     print("\n👋 ¡Hasta luego!")
                     break
                 
-                response = router(user_input, session_state)
+                response = router_agent(user_input, {})
                 print(f"\n🤖 Asistente: {response}\n")
                 
             except KeyboardInterrupt:
@@ -118,5 +111,10 @@ def main():
         print(f"\n❌ Error fatal: {str(e)}")
         return
 
+# Instanciar FastAPI y agregar las rutas del chat
+app = FastAPI()
+app.include_router(chat_router)
+
 if __name__ == "__main__":
+    # Ejecutar en modo consola si se invoca directamente
     main()
