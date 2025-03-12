@@ -19,7 +19,7 @@ def create_evaluation_agent(llm, vectorstores: Dict[str, Chroma]):
        - Tipos de preguntas solicitados
        - Temas o contenidos específicos
        - Formato de evaluación requerido
-       - Mes del año escolar (para ajustar dificultad según progresión)
+       - Mes del año escolar (para ajustar la dificultad según la progresión)
 
     2. CONFIGURACIÓN POR DEFECTO (si no se especifica):
        - 8 preguntas de selección múltiple
@@ -52,11 +52,10 @@ def create_evaluation_agent(llm, vectorstores: Dict[str, Chroma]):
     5. CONSIDERACIONES:
        - ADAPTA LA DIFICULTAD SEGÚN EL NIVEL EDUCATIVO (1° básico = 6 años hasta 4° medio = 18 años)
        - PROGRESIÓN MENSUAL EJEMPLO: el contenido de abril debe ser más avanzado que marzo y el de mayo más avanzado que abril.
-       - Alinear con objetivos de aprendizaje según mes del año escolar
-       - Adaptar lenguaje al nivel
-       - Incluir contextos significativos
-       - Evaluar diferentes habilidades
-       - Permitir demostrar comprensión
+       - Alinea con los objetivos de aprendizaje según el mes del año escolar.
+       - Adapta el lenguaje al nivel educativo.
+       - La evaluación debe reflejar la progresión natural del aprendizaje durante el año escolar: el mes indicado te ayudará a determinar la etapa y, por ello, la profundidad de las preguntas debe ajustarse al progreso esperado según el calendario y el nivel.
+       - Incluir contextos significativos, evaluar diferentes habilidades y permitir demostrar comprensión.
 
     IMPORTANTE: 
     - PRIORIZAR SIEMPRE los criterios específicos del usuario

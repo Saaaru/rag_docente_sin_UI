@@ -51,6 +51,7 @@ def create_planning_agent(llm, vectorstores: Dict[str, Chroma]):
        - Incluir habilidades transversales
        - Considerar diversidad de estudiantes
        - Incorporar elementos culturales chilenos
+       - La planificación debe comprender que el avance del aprendizaje es progresivo: el contenido y las actividades deben incrementarse en complejidad y profundidad conforme se avanza en el año escolar y con el nivel educativo.
 
     IMPORTANTE: 
     - ADAPTA LA DIFICULTAD SEGÚN EL NIVEL EDUCATIVO (1° básico = 6 años hasta 4° medio = 18 años)
@@ -172,7 +173,7 @@ def create_planning_agent(llm, vectorstores: Dict[str, Chroma]):
                 Por favor, genera una planificación educativa completa considerando:
                 1. El nivel y asignatura específicos
                 2. El contexto curricular proporcionado
-                3. La progresión del aprendizaje
+                3. La progresión del aprendizaje a lo largo del año escolar
                 4. El contexto educativo chileno
                 5. El mes específico: {mes}
                 """)

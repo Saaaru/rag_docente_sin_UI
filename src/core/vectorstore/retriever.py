@@ -144,3 +144,69 @@ def get_context_from_documents(docs: List[Document], max_length: int = 6000) -> 
     
     context = "\n\n".join(context_parts)
     return context, sources 
+
+# Funciones nuevas para búsquedas por categoría
+
+def retrieve_by_category(vectorstores: Dict[str, Chroma],
+                         category: str,
+                         query: str,
+                         k: int = 5,
+                         fetch_k_multiplier: int = 2,
+                         lambda_mult: float = 0.7) -> List[Document]:
+    """
+    Función genérica para recuperar documentos de una categoría específica del vectorstore.
+    
+    Args:
+        vectorstores: Diccionario de vectorstores.
+        category: Nombre de la categoría a buscar.
+        query: Consulta de búsqueda.
+        k: Número de documentos a recuperar.
+        fetch_k_multiplier: Factor para calcular fetch_k (default: 2).
+        lambda_mult: Multiplicador lambda para el algoritmo de búsqueda (default: 0.7).
+    
+    Returns:
+        Lista de documentos encontrados o lista vacía en caso de error.
+    """
+    if category not in vectorstores:
+        print(f"❌ Categoría '{category}' no encontrada en los vectorstores disponibles")
+        return []
+    try:
+        documents = vectorstores[category].max_marginal_relevance_search(
+            query=query,
+            k=k,
+            fetch_k=k * fetch_k_multiplier,
+            lambda_mult=lambda_mult
+        )
+        print(f"✅ Se han recuperado {len(documents)} documentos de la categoría '{category}'")
+        return documents
+    except Exception as e:
+        print(f"❌ Error al recuperar documentos de la categoría {category}: {e}")
+        return []
+
+
+def retrieve_bases_curriculares(vectorstores: Dict[str, Chroma], query: str, k: int = 5) -> List[Document]:
+    """
+    Recupera documentos de la categoría 'bases curriculares'.
+    """
+    return retrieve_by_category(vectorstores, "bases curriculares", query, k)
+
+
+def retrieve_actividades_sugeridas(vectorstores: Dict[str, Chroma], query: str, k: int = 5) -> List[Document]:
+    """
+    Recupera documentos de la categoría 'actividades sugeridas'.
+    """
+    return retrieve_by_category(vectorstores, "actividades sugeridas", query, k)
+
+
+def retrieve_orientaciones(vectorstores: Dict[str, Chroma], query: str, k: int = 5) -> List[Document]:
+    """
+    Recupera documentos de la categoría 'orientaciones'.
+    """
+    return retrieve_by_category(vectorstores, "orientaciones", query, k)
+
+
+def retrieve_propuesta(vectorstores: Dict[str, Chroma], query: str, k: int = 5) -> List[Document]:
+    """
+    Recupera documentos de la categoría 'propuesta'.
+    """
+    return retrieve_by_category(vectorstores, "propuesta", query, k) 
