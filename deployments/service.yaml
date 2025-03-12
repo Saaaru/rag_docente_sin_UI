@@ -1,0 +1,21 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: rag-docente
+  namespace: appdocente-453515
+  annotations:
+    run.googleapis.com/ingress: "all"         # Permite acceso público
+spec:
+  template:
+    spec:
+      containers:
+        - image: gcr.io/appdocente-453515/rag-docente:latest
+          command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+          env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/app/src/config/credentials/appdocente-453515-41ddf072f3e5.json"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "appdocente-453515"
+          ports:
+            - containerPort: 8080
+      containerConcurrency: 80
