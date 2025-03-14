@@ -9,15 +9,17 @@ from core.llm import get_llm
 from core.vectorstore.loader import initialize_vectorstore, COLLECTION_NAMES
 from core.agents.router_agent import create_router_agent
 
-# Importar el router de chat
+# Importar el router de chat (si lo tienes)
 from api.routes.chat import router as chat_router
 
 # Configuración de directorios
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # Ajuste para subir un nivel más
-PDF_DIRECTORY = os.path.join(BASE_DIR, "data", "raw", "pdf_docs")
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+PDF_DIRECTORY = os.path.join(BASE_DIR, "data", "raw")
 PERSIST_DIRECTORY = os.path.join(BASE_DIR, "data", "processed", "vectorstores")
-TEMPLATES_DIR = os.path.join(BASE_DIR, "src", "api", "templates")  # Ruta correcta a templates
-STATIC_DIR = os.path.join(BASE_DIR, "src", "api", "static")      # Ruta correcta a static
+TEMPLATES_DIR = os.path.join(BASE_DIR, "src", "api", "templates")
+STATIC_DIR = os.path.join(BASE_DIR, "src", "api", "static")
+# Credenciales (ya no se usan, pero se mantiene la definición de la variable)
+credentials_path = os.path.join(BASE_DIR, "src", "config", "credentials", "proyecto-docente-453715-a70af6ec3ae6.json")
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -29,13 +31,14 @@ class VectorstoreInitializationError(Exception):
 
 def initialize_system():
     """Inicializa los componentes básicos del sistema."""
-    logger.info("Inicializando Sistema Multi-Agente Educativo...")
-    logger.info("⚙️ Inicializando componentes...")
+    print("\nInicializando Sistema Multi-Agente Educativo...")
+    print("⚙️ Inicializando componentes...")
+    
     try:
         # Inicializar LLM
         llm = get_llm()
-        logger.info("✅ LLM inicializado")
-
+        print("✅ LLM inicializado")
+        
         # Asegurar que existan los directorios necesarios
         os.makedirs(PDF_DIRECTORY, exist_ok=True)
         os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
