@@ -9,7 +9,6 @@ CREDENTIALS_DIR = os.path.join(BASE_DIR, "src", "config", "credentials")
 
 # Archivos de configuración y credenciales
 ENV_PATH = os.path.join(CREDENTIALS_DIR, ".env")
-GOOGLE_CREDENTIALS_FILE = os.path.join(CREDENTIALS_DIR, "gen-lang-client-0115469242-239dc466873d.json")
 
 # Configuración de Chroma
 COLLECTION_NAME = "pdf-rag-chroma"

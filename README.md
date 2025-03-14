@@ -1,28 +1,51 @@
 # RAG Docente - Asistente para Planificación Educativa
 
-## Descripción
-RAG Docente es una aplicación de Recuperación Aumentada por Generación (RAG) diseñada para ayudar a los docentes chilenos en la creación de planificaciones educativas basadas en el currículum nacional. El sistema utiliza modelos de IA avanzados para analizar documentos educativos en formato PDF y proporcionar respuestas específicas y contextualizadas a consultas relacionadas con planificaciones, evaluaciones y actividades educativas.
+## Descripción General
+RAG Docente es una aplicación basada en la técnica de Recuperación Aumentada por Generación (RAG) que asiste a los docentes chilenos en la creación de planificaciones educativas alineadas con el currículo nacional. La aplicación combina el procesamiento de documentos en formato PDF, técnicas de vectorización mediante embeddings y modelos avanzados de inteligencia artificial para responder consultas específicas y contextualizadas.
 
-## Características principales
-- **Recuperación inteligente de documentos**: Utiliza embeddings y vectores semánticos para encontrar información relevante en documentos del currículum chileno.
-- **Respuestas contextualizadas**: Mantiene el contexto de la conversación para proporcionar respuestas coherentes.
-- **Historial de conversaciones**: Guarda automáticamente las conversaciones para referencias futuras.
-- **Optimización de recursos**: Evita recrear la base de datos vectorial si ya existe, ahorrando tiempo y recursos computacionales.
+## Características Principales
+- **Recuperación Inteligente de Documentos:**  
+  Utiliza técnicas de embeddings y vectores semánticos para extraer información relevante de documentos oficiales del currículo.
+  
+- **Respuestas Contextualizadas:**  
+  Mantiene el contexto de la conversación mediante un sistema de historial (LangGraph), asegurando respuestas coherentes a lo largo del tiempo.
+  
+- **Optimización de Recursos:**  
+  Verifica la existencia de la base de datos vectorial (almacenada en `pdf-rag-chroma/`) para evitar reprocesamientos innecesarios y mejorar la eficiencia.
+  
+- **Integración con Google Vertex AI:**  
+  Aprovecha modelos como Gemini 1.5 Flash y `text-embedding-004` para generar respuestas precisas y transformar fragmentos de texto en vectores numéricos.
 
-## Uso de la aplicación
-El sistema está diseñado para asistir a los docentes en:
-- Creación de planificaciones anuales y mensuales
-- Desarrollo de actividades alineadas con el currículum
-- Diseño de evaluaciones según objetivos de aprendizaje
-- Consultas sobre marcos curriculares por nivel y asignatura
+- **Escalabilidad y Modularidad:**  
+  La arquitectura está diseñada para separar las responsabilidades (procesamiento de PDFs, vectorización, gestión del historial) y facilitar el mantenimiento y la ejecución de pruebas.
 
-## Requisitos previos
-- Python 3.8 o superior
-- Cuenta en Google Cloud con API Vertex AI habilitada
-- Archivo de credenciales de Google Cloud (JSON)
-- Cuenta en LangSmith (opcional, para seguimiento de interacciones)
+## Funcionamiento Técnico
+### 1. Procesamiento de Documentos
+- Los documentos PDF se almacenan en la carpeta `pdf_docs/`.
+- Se dividen en fragmentos optimizados para preservar el contexto y facilitar su análisis.
+- Es recomendable usar documentos oficiales del Ministerio de Educación de Chile para obtener resultados óptimos.
 
-## Dependencias principales
+### 2. Vectorización y Almacenamiento
+- Cada fragmento se transforma en un vector numérico utilizando el modelo `text-embedding-004` de Vertex AI.
+- Los vectores resultantes se almacenan en una base de datos Chroma, permitiendo búsquedas semánticas rápidas.
+- Se valida si ya existe una base de datos previa para evitar reprocesar los documentos.
+
+### 3. Sistema de Recuperación y Generación de Respuestas
+- **Enhanced Retriever:** Utilizado para consultas que requieren respuestas más puntuales y precisas.
+- **Contextual Retriever:** Permite el mantenimiento del contexto en conversaciones extendidas.
+- La generación de respuestas se realiza mediante el modelo Gemini 1.5 Flash a través de la API de Google Vertex AI.
+
+### 4. Gestión de Estado y Memoria
+- Se implementa un grafo de estados (LangGraph) que registra todo el historial de conversaciones, ayudando a mantener el contexto y a gestionar interacciones complejas.
+
+## Instalación y Configuración
+### Requisitos Previos
+- Python 3.8 o superior.
+- Cuenta en Google Cloud con la API de Vertex AI habilitada.
+- Archivo de credenciales de Google Cloud (JSON) ubicado en la carpeta `db/`.
+- (Opcional) Cuenta en LangSmith para seguimiento de interacciones.
+
+### Dependencias Principales
 ```
 langchain-core
 langgraph

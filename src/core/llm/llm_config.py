@@ -1,4 +1,3 @@
-from langchain_google_vertexai import ChatVertexAI
 from config.model_config import (
     LLM_MODEL_NAME,
     LLM_TEMPERATURE,
@@ -23,14 +22,8 @@ class EmbeddingConfig:
     model_name: str = "text-multilingual-embedding-002"
 
 def get_llm():
-    """Inicializa y retorna el modelo LLM configurado"""
-    return ChatVertexAI(
-        model_name=LLM_MODEL_NAME,
-        temperature=LLM_TEMPERATURE,
-        max_output_tokens=LLM_MAX_TOKENS,
-        top_p=LLM_TOP_P,
-        top_k=LLM_TOP_K,
-    )
+    """Implementación de LLM eliminada para Google Cloud."""
+    raise NotImplementedError("La implementación de LLM para Google Cloud ha sido eliminada.")
 
 def get_llm_config() -> LLMConfig:
     return LLMConfig()

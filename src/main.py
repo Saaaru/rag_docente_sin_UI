@@ -1,120 +1,144 @@
 import os
 import uuid
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Form, HTTPException, Depends
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 from core.llm import get_llm
-from core.vectorstore.loader import initialize_vectorstore
+from core.vectorstore.loader import initialize_vectorstore, COLLECTION_NAMES
 from core.agents.router_agent import create_router_agent
 
 # Importar el router de chat
 from api.routes.chat import router as chat_router
 
-# Credenciales para usar VERTEX_AI
-credentials_path = r"C:/Users/Dante/Desktop/rag_docente_sin_UI-1/src/config/credentials/appdocente-453515-41ddf072f3e5.json"
-if not os.path.exists(credentials_path):
-    raise FileNotFoundError(
-        f"No se encontró el archivo de credenciales en: {credentials_path}")
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
-
 # Configuración de directorios
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # Ajuste para subir un nivel más
 PDF_DIRECTORY = os.path.join(BASE_DIR, "data", "raw", "pdf_docs")
 PERSIST_DIRECTORY = os.path.join(BASE_DIR, "data", "processed", "vectorstores")
+TEMPLATES_DIR = os.path.join(BASE_DIR, "src", "api", "templates")  # Ruta correcta a templates
+STATIC_DIR = os.path.join(BASE_DIR, "src", "api", "static")      # Ruta correcta a static
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class VectorstoreInitializationError(Exception):
+    """Excepción personalizada para errores de inicialización del vectorstore."""
+    pass
 
 def initialize_system():
     """Inicializa los componentes básicos del sistema."""
-    print("\nInicializando Sistema Multi-Agente Educativo...")
-    print("⚙️ Inicializando componentes...")
-    
-    # Configurar logging
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-    
+    logger.info("Inicializando Sistema Multi-Agente Educativo...")
+    logger.info("⚙️ Inicializando componentes...")
     try:
         # Inicializar LLM
         llm = get_llm()
-        print("✅ LLM inicializado")
-        
+        logger.info("✅ LLM inicializado")
+
         # Asegurar que existan los directorios necesarios
         os.makedirs(PDF_DIRECTORY, exist_ok=True)
         os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
-        
+
+        # Verificar la estructura de carpetas para las categorías
+        for category in COLLECTION_NAMES:
+            category_path = os.path.join(PDF_DIRECTORY, category)
+            if not os.path.exists(category_path):
+                logger.warning(f"⚠️ La carpeta de la categoría '{category}' no existe en {PDF_DIRECTORY}.  "
+                               f"Asegúrate de que la estructura de carpetas sea correcta.")
+                # Podrías crear la carpeta aquí si quieres:
+                # os.makedirs(category_path, exist_ok=True)
+
         # Inicializar vectorstores
         vectorstores = initialize_vectorstore(
             pdf_directory=PDF_DIRECTORY,
             persist_directory=PERSIST_DIRECTORY
         )
-        
+
         if not vectorstores:
-            raise ValueError("No se pudo inicializar ninguna colección de vectorstore")
-        
-        # Mostrar resumen de colecciones
-        print("\n📊 Colecciones disponibles:")
+            raise VectorstoreInitializationError("No se pudo inicializar ninguna colección de vectorstore")
+
+        # Mostrar resumen de colecciones (mejorado)
+        logger.info("📊 Colecciones disponibles:")
         for category, vs in vectorstores.items():
-            collection_size = len(vs.get()['ids'])
-            print(f"   - {category}: {collection_size} documentos")
-        
+            try:
+                collection_size = len(vs.get()['ids'])
+                logger.info(f"   - {category}: {collection_size} documentos")
+            except Exception as e:
+                logger.error(f"Error al obtener el tamaño de la colección {category}: {e}")
+                raise VectorstoreInitializationError(f"Error al acceder a la colección {category}")
+
         return llm, vectorstores, logger
-        
+
+    except VectorstoreInitializationError as e:
+        logger.error(f"Error crítico de inicialización: {e}")
+        raise  # Relanzar la excepción para que se maneje en el nivel superior
     except Exception as e:
-        logger.error(f"Error fatal al inicializar el sistema: {str(e)}")
-        raise e
+        logger.exception(f"Error fatal al inicializar el sistema: {e}")  # Usar logger.exception
+        raise  # Relanzar la excepción
 
-def main():
-    """Punto de entrada principal del sistema en modo consola."""
-    try:
-        # Inicializar componentes básicos
-        llm, vectorstores, logger = initialize_system()
-        
-        # Generar ID de sesión
-        thread_id = str(uuid.uuid4())[:8]
-        logger.info(f"🔑 ID de sesión: {thread_id}")
+# Inicializar componentes *fuera* de la función main (para que sean globales)
+try:
+    llm, vectorstores, logger = initialize_system()
+except VectorstoreInitializationError:
+    logger.critical("No se puede continuar sin un vectorstore válido. Saliendo.")
+    exit(1)  # Salir del programa si no se puede inicializar el vectorstore
+except Exception:
+    logger.critical("Error fatal durante la inicialización. Saliendo.")
+    exit(1)
 
-        # Crear router agent con vectorstores
-        router_agent = create_router_agent(
+# Instanciar FastAPI
+app = FastAPI()
+
+# Montar el directorio de archivos estáticos
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# Configurar Jinja2Templates
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+# --- Gestión del Router Agent ---
+_router_agents = {}  # Diccionario para almacenar los agentes por thread_id
+
+def get_router_agent(thread_id: str):
+    """Obtiene o crea un router agent para un thread_id dado."""
+    global _router_agents
+    if thread_id not in _router_agents:
+        logger.info(f"Creando nuevo router agent para thread_id: {thread_id}")
+        _router_agents[thread_id] = create_router_agent(
             llm=llm,
             vectorstores=vectorstores,
             logger=logger,
             thread_id=thread_id
         )
+    return _router_agents[thread_id]
 
-        print("\n" + "=" * 50)
-        print("🎯 Sistema listo para procesar solicitudes!")
-        print("Puedes solicitar:")
-        print("1. PLANIFICACIONES educativas")
-        print("2. EVALUACIONES")
-        print("3. GUÍAS de estudio")
-        print("\nCategorías de documentos disponibles:")
-        for categoria in vectorstores.keys():
-            print(f"- {categoria}")
-        print("=" * 50 + "\n")
+# --- Rutas de la API ---
 
-        # Loop principal de conversación en modo consola
-        while True:
-            try:
-                user_input = input("👤 Usuario: ").strip()
-                if user_input.lower() in ['exit', 'quit', 'salir']:
-                    print("\n👋 ¡Hasta luego!")
-                    break
-                
-                response = router_agent(user_input, {})
-                print(f"\n🤖 Asistente: {response}\n")
-                
-            except KeyboardInterrupt:
-                print("\n\n👋 ¡Hasta luego!")
-                break
-            except Exception as e:
-                logger.error(f"Error en el loop principal: {e}")
-                print("\n❌ Ocurrió un error. Por favor, intenta de nuevo.")
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    """Sirve la página principal (index.html)."""
+    thread_id = request.cookies.get("thread_id")
+    if not thread_id:
+        thread_id = str(uuid.uuid4())[:8]
+        response = templates.TemplateResponse("chat.html", {"request": request, "thread_id": thread_id})
+        response.set_cookie("thread_id", thread_id)
+        return response
+    return templates.TemplateResponse("chat.html", {"request": request, "thread_id": thread_id})
 
+@app.post("/consultar", response_class=JSONResponse)
+async def consultar(pregunta: str = Form(...), thread_id: str = Form(...)):
+    """Maneja las consultas desde la interfaz web."""
+    try:
+        router_agent = get_router_agent(thread_id)
+        response = router_agent(pregunta, {})  # Pasar un diccionario vacío como session_state
+        return {"respuesta": response}
+
+    except VectorstoreInitializationError as e:
+        logger.error(f"Error de inicialización del vectorstore: {e}")
+        raise HTTPException(status_code=500, detail=str(e))  # Devolver el mensaje de la excepción
     except Exception as e:
-        print(f"\n❌ Error fatal: {str(e)}")
-        return
+        logger.exception(f"Error en /consultar: {e}") # Usar logger.exception
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-# Instanciar FastAPI y agregar las rutas del chat
-app = FastAPI()
+# Incluir el router de chat (si lo tienes)
 app.include_router(chat_router)
-
-if __name__ == "__main__":
-    # Ejecutar en modo consola si se invoca directamente
-    main()
