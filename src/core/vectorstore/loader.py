@@ -5,7 +5,7 @@ from tqdm import tqdm
 from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
-#from langchain_google_vertexai import VertexAIEmbeddings  # Eliminado
+from core.embeddings.embedding_utils import get_embeddings
 import json
 from datetime import datetime
 from langchain.schema import Document
@@ -18,9 +18,6 @@ if src_dir not in sys.path:
 
 # Añadir después de las importaciones
 COLLECTION_NAMES = {
-    "propuesta": "pdf-rag-propuesta",
-    "orientaciones": "pdf-rag-orientaciones",
-    "leyes": "pdf-rag-leyes",
     "bases curriculares": "pdf-rag-bases-curriculares",
     "actividades sugeridas": "pdf-rag-actividades-sugeridas"
 }
@@ -31,7 +28,7 @@ class EmbeddingsManager:
     def get_embeddings(cls):
         raise NotImplementedError("La implementación de Google Cloud en embeddings ha sido eliminada.")
 
-def split_large_document(doc, max_tokens: int = 15000):
+def split_large_document(doc, max_tokens: int = 1500):
     """Divide documentos grandes en fragmentos más pequeños."""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_tokens,
@@ -40,45 +37,65 @@ def split_large_document(doc, max_tokens: int = 15000):
     )
     return text_splitter.split_documents([doc])
 
-def load_and_split_documents(pdf_directory: str, collection_name: str, max_tokens: int = 15000) -> List[Document]:
-    """Carga y divide documentos desde un directorio, manejando diferentes tipos de archivos."""
+def load_and_split_documents(pdf_directory: str, collection_name: str, max_tokens: int = 500) -> List[Document]:
+    """Carga y divide documentos desde un directorio."""
     print(f"🔍 Verificando colección: {collection_name}")
 
-    # Construcción CORRECTA de la ruta:
-    collection_folder_name = collection_name.replace("pdf-rag-", "")  # Obtiene "propuesta" de "pdf-rag-propuesta"
-    path_to_pdfs = os.path.join(pdf_directory, collection_folder_name) # Une data/raw con propuesta
-    print(f"  📂 Buscando PDFs en: {path_to_pdfs}")  #  Línea de depuración
+    # Obtener el nombre de la carpeta correcto del diccionario COLLECTION_NAMES
+    collection_folder_name = next(
+        (folder for folder, name in COLLECTION_NAMES.items() 
+         if name == collection_name),
+        None
+    )
+    
+    if not collection_folder_name:
+        print(f"❌ No se encontró la carpeta correspondiente para {collection_name}")
+        return []
+
+    path_to_pdfs = os.path.join(pdf_directory, collection_folder_name)
+    print(f"  📂 Buscando PDFs en: {path_to_pdfs}")
+
+    # Verificar que el directorio existe
+    if not os.path.exists(path_to_pdfs):
+        print(f"❌ El directorio no existe: {path_to_pdfs}")
+        return []
 
     loader = DirectoryLoader(
-        path=path_to_pdfs,  # Usar la ruta construida
-        glob="**/*.pdf",  # Busca PDFs recursivamente dentro de la carpeta
+        path=path_to_pdfs,
+        glob="**/*.pdf",
         loader_cls=PyPDFLoader,
         show_progress=True,
         use_multithreading=True
     )
 
-    docs = loader.load()
-    if not docs:
-        print(f"  📂 No se encontraron archivos PDF en: {path_to_pdfs}")
-        return []
+    try:
+        docs = loader.load()
+        if not docs:
+            print(f"  📂 No se encontraron archivos PDF en: {path_to_pdfs}")
+            return []
 
-    print(f"  📄 Documentos cargados: {len(docs)}")
-    all_splits = []
-    for doc in tqdm(docs, desc="Dividiendo documentos"):
-        splits = split_large_document(doc, max_tokens=max_tokens)
-        all_splits.extend(splits)
-    print(f"  ✅ Documentos divididos en {len(all_splits)} fragmentos")
-    return all_splits
+        print(f"  📄 Documentos cargados: {len(docs)}")
+        all_splits = []
+        for doc in tqdm(docs, desc="Dividiendo documentos"):
+            splits = split_large_document(doc, max_tokens=max_tokens)
+            all_splits.extend(splits)
+        print(f"  ✅ Documentos divididos en {len(all_splits)} fragmentos")
+        return all_splits
+    except Exception as e:
+        print(f"❌ Error al cargar documentos: {e}")
+        return []
 
 
 def initialize_vectorstore(pdf_directory: str, persist_directory: str) -> Dict[str, Any]:
-    """
-    Inicializa el vectorstore, creando o cargando colecciones según sea necesario.
-    """
+    """Inicializa el vectorstore, creando o cargando colecciones según sea necesario."""
     print("📚 Inicializando vectorstores...")
-    # embeddings = EmbeddingsManager.get_embeddings() # Aunque de error, es necesario para la creacion #COMENTADO
+    
+    embeddings = get_embeddings()
+    if not embeddings:
+        raise Exception("No se pudieron inicializar los embeddings")
+    
     vectorstores = {}
-
+    
     for category, collection_name in COLLECTION_NAMES.items():
         collection_path = os.path.join(persist_directory, collection_name)
         if os.path.exists(collection_path) and os.listdir(collection_path):
@@ -87,7 +104,7 @@ def initialize_vectorstore(pdf_directory: str, persist_directory: str) -> Dict[s
                 # Cargar la colección existente, *pasando la función de embedding*
                 vectorstore = Chroma(
                     collection_name=collection_name,
-                    # embedding_function=embeddings,  #  embedding_function aquí #COMENTADO
+                    embedding_function=embeddings,
                     persist_directory=persist_directory
                 )
                 vectorstores[category] = vectorstore
@@ -122,18 +139,21 @@ def initialize_vectorstore(pdf_directory: str, persist_directory: str) -> Dict[s
                 continue
 
             try:
-                vectorstore = Chroma.from_documents(
-                    docs,
-                    # embeddings, #COMENTADO
-                    collection_name=collection_name,
-                    persist_directory=persist_directory
+                # Crear el cliente Chroma primero
+                db = Chroma(
+                    persist_directory=persist_directory,
+                    embedding_function=embeddings,
+                    collection_name=collection_name
                 )
-                vectorstore.persist()
-                vectorstores[category] = vectorstore
-                print(f"  ✅ Colección '{category}' creada y persistida.")
+                
+                # Añadir los documentos
+                vectorstore = db.add_documents(documents=docs)
+                vectorstores[category] = db
+                print(f"  ✅ Colección '{category}' creada exitosamente.")
+                
             except Exception as e:
-                print(f"  ❌ Error al crear la colección '{category}': {e}")
-                continue  # Saltar a la siguiente colección
+                print(f"  ❌ Error detallado al crear la colección '{category}': {str(e)}")
+                continue
 
     if not vectorstores:
         print("\n⚠️ No se pudo cargar ninguna colección")

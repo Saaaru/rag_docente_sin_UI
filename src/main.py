@@ -13,13 +13,17 @@ from core.agents.router_agent import create_router_agent
 from api.routes.chat import router as chat_router
 
 # Configuración de directorios
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PDF_DIRECTORY = os.path.join(BASE_DIR, "data", "raw")
 PERSIST_DIRECTORY = os.path.join(BASE_DIR, "data", "processed", "vectorstores")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "src", "api", "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "src", "api", "static")
 # Credenciales (ya no se usan, pero se mantiene la definición de la variable)
-credentials_path = os.path.join(BASE_DIR, "src", "config", "credentials", "proyecto-docente-453715-a70af6ec3ae6.json")
+credentials_path = os.path.join(BASE_DIR, "src", "config", "credentials", "proyecto-docente-453715-b625fbe2c520.json")
+
+# Añade esto para debug
+print(f"📂 BASE_DIR: {BASE_DIR}")
+print(f"📂 PDF_DIRECTORY: {PDF_DIRECTORY}")
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -39,18 +43,15 @@ def initialize_system():
         llm = get_llm()
         print("✅ LLM inicializado")
         
-        # Asegurar que existan los directorios necesarios
-        os.makedirs(PDF_DIRECTORY, exist_ok=True)
+        # Asegurar que exista solo el directorio de persistencia
         os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
 
         # Verificar la estructura de carpetas para las categorías
         for category in COLLECTION_NAMES:
             category_path = os.path.join(PDF_DIRECTORY, category)
             if not os.path.exists(category_path):
-                logger.warning(f"⚠️ La carpeta de la categoría '{category}' no existe en {PDF_DIRECTORY}.  "
+                logger.warning(f"⚠️ La carpeta de la categoría '{category}' no existe en {PDF_DIRECTORY}. "
                                f"Asegúrate de que la estructura de carpetas sea correcta.")
-                # Podrías crear la carpeta aquí si quieres:
-                # os.makedirs(category_path, exist_ok=True)
 
         # Inicializar vectorstores
         vectorstores = initialize_vectorstore(

@@ -17,8 +17,8 @@ app = FastAPI(
 )
 
 # Configurar directorios
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-PDF_DIRECTORY = os.path.join(BASE_DIR, "data", "raw", "pdf_docs")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+PDF_DIRECTORY = os.path.join(BASE_DIR, "data", "raw")
 PERSIST_DIRECTORY = os.path.join(BASE_DIR, "data", "processed", "vectorstores")
 
 # Configurar logging

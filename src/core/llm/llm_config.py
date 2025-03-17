@@ -10,6 +10,7 @@ from config.model_config import (
 from dataclasses import dataclass
 from langchain_google_vertexai import ChatVertexAI  # Importar ChatVertexAI
 import json
+from google.oauth2 import service_account
 
 load_dotenv()
 
@@ -28,17 +29,16 @@ class EmbeddingConfig:
     model_name: str = os.getenv("EMBEDDING_MODEL_NAME", "text-embedding-004")
 
 def load_credentials(credentials_path: str):
-    """Carga las credenciales de Vertex AI desde un archivo JSON."""
+    """Carga las credenciales desde el archivo JSON."""
     try:
-        with open(credentials_path, 'r') as f:
-            credentials = json.load(f)
-            return credentials
-    except FileNotFoundError:
-        print(f"❌ Error: Archivo de credenciales no encontrado en {credentials_path}")
-        return None
-    except json.JSONDecodeError:
-        print(f"❌ Error: El archivo de credenciales no es un JSON válido.")
-        return None
+        abs_path = os.path.abspath(credentials_path)
+        if not os.path.exists(abs_path):
+            print(f"❌ Error: Archivo de credenciales no encontrado en {abs_path}")
+            return None
+            
+        credentials = service_account.Credentials.from_service_account_file(abs_path)
+        print("✅ Credenciales cargadas correctamente.")
+        return credentials
     except Exception as e:
         print(f"❌ Error al cargar credenciales: {e}")
         return None
