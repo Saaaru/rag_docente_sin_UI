@@ -1,22 +1,17 @@
-from src.core.vectorstore.loader import load_pdf_documents
-from src.core.embeddings.embedding_utils import get_embeddings
-from src.core.vectorstore.store import create_vectorstore
-from src.config.paths import PDF_DIRECTORY, COLLECTION_NAME
+from src.core.vectorstore.loader import initialize_vectorstore
+from src.config.paths import RAW_DIR, PERSIST_DIRECTORY
 
 def main():
     """Procesa los documentos PDF y crea/actualiza el vectorstore"""
     print("Procesando documentos...")
     
-    # Cargar documentos
-    documents = load_pdf_documents(PDF_DIRECTORY)
-    if not documents:
-        print("No se encontraron documentos para procesar.")
-        return
-    
-    # Crear vectorstore
-    embeddings = get_embeddings()
-    vectorstore = create_vectorstore(documents, embeddings, COLLECTION_NAME)
-    print("Procesamiento completado.")
+    # Inicializar el vectorstore (esto carga o crea las colecciones)
+    vectorstores = initialize_vectorstore(persist_directory=str(PERSIST_DIRECTORY))
+
+    if vectorstores:
+        print("Procesamiento completado.")
+    else:
+        print("Error: No se pudo inicializar el vectorstore.")
 
 if __name__ == "__main__":
     main() 

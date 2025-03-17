@@ -1,7 +1,9 @@
 from .paths import (
-    PDF_DIRECTORY,
-    COLLECTION_NAME,
+    RAW_DIR,
     PERSIST_DIRECTORY,
+    SRC_DIR,
+    CREDENTIALS_DIR,
+    COLLECTION_NAME,
     CONVERSATION_DIRECTORY
 )
 from .model_config import (
@@ -15,9 +17,11 @@ from .model_config import (
 from .env_loader import load_environment
 
 __all__ = [
-    'PDF_DIRECTORY',
-    'COLLECTION_NAME',
+    'RAW_DIR',
     'PERSIST_DIRECTORY',
+    'SRC_DIR',
+    'CREDENTIALS_DIR',
+    'COLLECTION_NAME',
     'CONVERSATION_DIRECTORY',
     'LLM_MODEL_NAME',
     'LLM_TEMPERATURE',

@@ -1,7 +1,7 @@
 from .loader import (
     initialize_vectorstore,
-    COLLECTION_NAMES,
-    EmbeddingsManager,  #  Aunque no se use, se necesita para la creación
+    load_and_split_documents,
+    split_large_document,
 )
 from .retriever import (
     retrieve_documents,
@@ -16,8 +16,8 @@ from .retriever import (
 
 __all__ = [
     'initialize_vectorstore',
-    'COLLECTION_NAMES',
-    'EmbeddingsManager',
+    'load_and_split_documents',
+    'split_large_document',
     'retrieve_documents',
     'retrieve_with_filter',
     'get_context_from_documents',

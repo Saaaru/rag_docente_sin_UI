@@ -14,6 +14,8 @@ from core.agents.planning_agent import create_planning_agent
 from core.agents.evaluation_agent import create_evaluation_agent
 from core.agents.study_guide_agent import create_study_guide_agent
 
+_agent_cache = {}  # Diccionario para almacenar las instancias de los agentes
+
 class RouterChatModel(BaseChatModel):
     """Modelo de chat personalizado para el router que interpreta las consultas de usuario."""
     
@@ -121,21 +123,19 @@ class RouterChatModel(BaseChatModel):
 
 def create_router_agent(llm, vectorstores: Dict[str, Chroma], logger: logging.Logger, thread_id: str):
     """
-    Crea un agente router que coordina los agentes especializados.
-    
-    Args:
-        llm: Modelo de lenguaje a utilizar
-        vectorstores: Diccionario de vectorstores por categoría
-        logger: Logger para registro de eventos
-        thread_id: Identificador único de la conversación
+    Crea un agente router que coordina los agentes especializados (con caché).
     """
+    global _agent_cache
+
+    if "planning" not in _agent_cache:
+        _agent_cache["planning"] = create_planning_agent(llm, vectorstores)
+    if "evaluation" not in _agent_cache:
+        _agent_cache["evaluation"] = create_evaluation_agent(llm, vectorstores)
+    if "study_guide" not in _agent_cache:
+        _agent_cache["study_guide"] = create_study_guide_agent(llm, vectorstores)
+
     router_chat = RouterChatModel(llm=llm, logger=logger)
-    
-    # Crear instancias de los agentes especializados
-    planning_agent = create_planning_agent(llm, vectorstores)
-    evaluation_agent = create_evaluation_agent(llm, vectorstores)
-    study_guide_agent = create_study_guide_agent(llm, vectorstores)
-    
+
     def router(user_input: str, session_state: Dict[str, Any]) -> str:
         """
         Función principal del router.
@@ -193,9 +193,9 @@ def create_router_agent(llm, vectorstores: Dict[str, Chroma], logger: logging.Lo
 
             # Seleccionar y llamar al agente apropiado
             agent_map = {
-                "PLANIFICACION": planning_agent,
-                "EVALUACION": evaluation_agent,
-                "GUIA": study_guide_agent
+                "PLANIFICACION": _agent_cache["planning"],
+                "EVALUACION": _agent_cache["evaluation"],
+                "GUIA": _agent_cache["study_guide"]
             }
             
             selected_agent = agent_map.get(interpretation["tipo_contenido"])
