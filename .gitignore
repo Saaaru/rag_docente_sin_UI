@@ -1,3 +1,4 @@
 conversaciones/
 data/
+!data/elimina_duplicados.py
 src/config/credentials/
