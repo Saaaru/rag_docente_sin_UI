@@ -6,23 +6,18 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import vertexai
-from vertexai.generative_models import GenerativeModel, ChatSession
-from core.vectorstore.loader import initialize_vectorstore
-from core.agents.router_agent import create_router_agent
-from config.paths import (
-    RAW_DIR,
-    PERSIST_DIRECTORY,
-    SRC_DIR,
-    CREDENTIALS_DIR
-)
-from config.model_config import EMBEDDING_MODEL_NAME
-from core.llm import get_llm  # <- Importamos get_llm desde core.llm
-from core.router import get_router_agent, reset_router_agent  # Importamos desde core.router
+from src.core.vectorstore.loader import initialize_vectorstore  # <-- AHORA CON src.
+from src.config.paths import (  # <-- AHORA CON src.
+        RAW_DIR,
+        PERSIST_DIRECTORY,
+        SRC_DIR,
+        CREDENTIALS_DIR
+    )
+from src.core.llm import get_llm  # <-- AHORA CON src.
+from src.core.router import get_router_agent, RouterAgent, reset_router_agent  # <-- AHORA CON src.
+from src.api.routes import chat as chat_router  # <-- AHORA CON src.
 
-# Importar el router de chat (si lo tienes)
-from api import chat_router
-
-# Configuración de directorios usando paths.py
+# Configuración de directorios
 TEMPLATES_DIR = SRC_DIR / "api" / "templates"
 STATIC_DIR = SRC_DIR / "api" / "static"
 
@@ -38,99 +33,76 @@ class VectorstoreInitializationError(Exception):
     """Excepción personalizada para errores de inicialización del vectorstore."""
     pass
 
-# --- Configuración de Vertex AI ---
-import os
-from pathlib import Path
+# --- Configuración de Vertex AI (simplificada) ---
+def initialize_vertexai():
+    """Inicializa Vertex AI de forma segura."""
+    project_id = os.environ.get("GOOGLE_PROJECT_ID")
+    credentials_path = str(CREDENTIALS_DIR / "proyecto-docente-453715-b625fbe2c520.json")
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path  # Siempre establecer
 
-# Obtener el ID del proyecto y la ruta de las credenciales
-PROJECT_ID = os.environ.get("GOOGLE_PROJECT_ID")
-if not PROJECT_ID:
-    # Si no está en las variables de entorno, intentar obtenerlo del archivo de credenciales
-    try:
-        import json
-        credentials_path = str(CREDENTIALS_DIR / "proyecto-docente-453715-b625fbe2c520.json")
-        with open(credentials_path, 'r') as f:
-            creds_data = json.load(f)
-            PROJECT_ID = creds_data.get('project_id')
-            # Establecer la variable de entorno
-            os.environ["GOOGLE_PROJECT_ID"] = PROJECT_ID
-    except Exception as e:
-        logger.error(f"Error al leer el archivo de credenciales: {e}")
-        raise RuntimeError("No se pudo obtener el PROJECT_ID")
+    if not project_id:
+        try:
+            import json
+            with open(credentials_path, 'r') as f:
+                project_id = json.load(f).get('project_id')
+            if not project_id:
+                raise ValueError("project_id no encontrado en credenciales.")
+            os.environ["GOOGLE_PROJECT_ID"] = project_id  # Establecer si se encuentra
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Error al obtener project_id: {e}")
+            raise
 
-# Establecer GOOGLE_APPLICATION_CREDENTIALS
-credentials_path = str(CREDENTIALS_DIR / "proyecto-docente-453715-b625fbe2c520.json")
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+    if not os.path.exists(credentials_path) or not os.access(credentials_path, os.R_OK):
+        raise FileNotFoundError(f"Error de credenciales en: {credentials_path}")
 
-LOCATION = "us-central1"
-
-# Inicializar Vertex AI con el PROJECT_ID explícito
-print(f"Inicializando Vertex AI con PROJECT_ID: {PROJECT_ID}")
-print(f"Usando credenciales de: {credentials_path}")
-
-vertexai.init(
-    project=PROJECT_ID,
-    location=LOCATION,
-    credentials=None  # Usará GOOGLE_APPLICATION_CREDENTIALS automáticamente
-)
-
-# Añade esta verificación justo después de definir credentials_path
-if not os.path.exists(credentials_path):
-    raise FileNotFoundError(f"No se encontró el archivo de credenciales en: {credentials_path}")
-if not os.access(credentials_path, os.R_OK):
-    raise PermissionError(f"No se puede leer el archivo de credenciales en: {credentials_path}")
-
-def start_chat_session(model):
-    """Inicia y devuelve una sesión de chat."""
-    try:
-        logger.info("Iniciando sesión de chat...")
-        chat_session = model.start_chat()
-        logger.info("Sesión de chat iniciada exitosamente.")
-        return chat_session
-    except Exception as e:
-        logger.error(f"Error al iniciar la sesión de chat: {e}")
-        return None
+    vertexai.init(project=project_id, location="us-central1")
+    logger.info(f"Vertex AI inicializado. Project ID: {project_id}")
 
 def initialize_system():
-    """Inicializa los componentes básicos del sistema."""
-    print("\nInicializando Sistema Multi-Agente Educativo...")
-    
-    try:
-        # Inicializar LLM
-        llm = get_llm()
-        if not llm:
-            raise VectorstoreInitializationError("No se pudo inicializar el LLM")
-        print("✅ LLM inicializado")
+        """Inicializa LLM, vectorstores y verifica directorios."""
+        print("\nInicializando Sistema Multi-Agente Educativo...")
 
-        # Inicializar vectorstores
-        vectorstores = initialize_vectorstore()
-        if not vectorstores:
-            raise VectorstoreInitializationError(
-                "No se pudo inicializar ninguna colección de vectorstore. " +
-                "Verifica que existan PDFs en subdirectorios de data/raw"
-            )
+        try:
+            # Verificar directorios necesarios
+            if not os.path.exists(RAW_DIR):
+                logger.error(f"No existe el directorio RAW_DIR: {RAW_DIR}")
+                raise FileNotFoundError(f"Directorio RAW_DIR no encontrado: {RAW_DIR}")
 
-        # Mostrar resumen de colecciones
-        print("\n📊 Colecciones disponibles:")
-        for collection_name, vs in vectorstores.items():
-            try:
-                collection_size = len(vs.get()['ids'])
-                print(f"   ✓ {collection_name}: {collection_size} documentos")
-            except Exception as e:
-                print(f"   ⚠️ {collection_name}: Error al obtener tamaño - {e}")
+            if not os.path.exists(PERSIST_DIRECTORY):
+                os.makedirs(PERSIST_DIRECTORY)
+                logger.info(f"Creado directorio PERSIST_DIRECTORY: {PERSIST_DIRECTORY}")
 
-        return llm, vectorstores, logger
+            # Inicializar LLM
+            llm = get_llm()
+            if not llm:
+                raise RuntimeError("No se pudo inicializar el LLM")
+            print("✅ LLM inicializado")
 
-    except VectorstoreInitializationError as e:
-        logger.error(f"Error crítico de inicialización: {e}")
-        raise
-    except Exception as e:
-        logger.exception(f"Error fatal al inicializar el sistema: {e}")
-        raise
+            # Inicializar vectorstores con manejo de errores mejorado
+            vectorstores = initialize_vectorstore()  # Se llama, pero NO se guarda en el ámbito global
+            if not vectorstores:
+                raise RuntimeError(
+                    "No se pudo inicializar ninguna colección. Verifica data/raw"
+                )
 
+            # Mostrar resumen detallado de colecciones
+            print("\n📊 Colecciones disponibles:")
+            for collection_name, vs in vectorstores.items():
+                try:
+                    collection_size = len(vs.get()['ids'])
+                    print(f"   ✓ {collection_name}: {collection_size} documentos")
+                except Exception as e:
+                    print(f"   ⚠️ {collection_name}: Error al obtener tamaño - {e}")
+
+            return llm, logger  # SOLO llm y logger
+
+        except Exception as e:
+            logger.exception(f"Error fatal al inicializar el sistema: {e}")
+            raise
 # Inicializar componentes *fuera* de la función main (para que sean globales)
 try:
-    llm, vectorstores, logger = initialize_system()
+    initialize_vertexai()  # Inicializar Vertex AI *antes* que nada
+    llm, logger = initialize_system()
 except VectorstoreInitializationError:
     logger.critical("No se puede continuar sin un vectorstore válido. Saliendo.")
     exit(1)  # Salir del programa si no se puede inicializar el vectorstore
@@ -147,46 +119,29 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Configurar Jinja2Templates
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-# --- Gestión del Router Agent ---
-_router_agents = {}  # Diccionario para almacenar los agentes por thread_id
-
-def get_router_agent(thread_id: str):
-    """Obtiene o crea un router agent para un thread_id dado."""
-    global _router_agents
-    if thread_id not in _router_agents:
-        logger.info(f"Creando nuevo router agent para thread_id: {thread_id}")
-        _router_agents[thread_id] = create_router_agent(
-            llm=llm,
-            vectorstores=vectorstores,
-            logger=logger,
-            thread_id=thread_id
-        )
-    return _router_agents[thread_id]
+# --- Gestión del Router Agent (simplificado) ---
+# Usamos la función get_router_agent directamente como dependencia
 
 # --- Rutas de la API ---
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     """Sirve la página principal (index.html)."""
-    thread_id = request.cookies.get("thread_id")
-    if not thread_id:
-        thread_id = str(uuid.uuid4())[:8]
-        response = templates.TemplateResponse("chat.html", {"request": request, "thread_id": thread_id})
-        response.set_cookie("thread_id", thread_id)
-        return response
-    return templates.TemplateResponse("chat.html", {"request": request, "thread_id": thread_id})
+    thread_id = request.cookies.get("thread_id") or str(uuid.uuid4())[:8]
+    response = templates.TemplateResponse("chat.html", {"request": request, "thread_id": thread_id})
+    response.set_cookie("thread_id", thread_id)
+    return response
+
 
 @app.post("/consultar", response_class=JSONResponse)
-async def consultar(pregunta: str = Form(...), thread_id: str = Form(...)):
-    """Maneja las consultas desde la interfaz web."""
+async def consultar(pregunta: str = Form(...), thread_id: str = Form(...), router_agent: RouterAgent = Depends(get_router_agent)):
+    """Maneja las consultas (usando inyección de dependencias)."""
     try:
-        router_agent = get_router_agent(thread_id)
         response = router_agent(pregunta, {})
         return {"respuesta": response}
-
     except Exception as e:
         logger.exception(f"Error en /consultar: {e}")
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        raise HTTPException(status_code=500, detail="Error interno")
 
 # Incluir el router de chat
 app.include_router(chat_router)
@@ -200,7 +155,7 @@ async def chat_with_agent(
     session_id: str = Form(...)
 ):
     """
-    Chatea con el agente, utilizando una sesión de chat de Vertex AI.
+    Chatea con el agente.
     """
     llm = get_llm()  # Obtenemos el modelo
     if llm is None:
@@ -210,12 +165,8 @@ async def chat_with_agent(
     global _router_agents  # Accedemos a la variable global
     if session_id not in _router_agents:
         # Creamos el router agent *solo si no existe*
-        _router_agents[session_id] = create_router_agent(
-            llm=llm,
-            vectorstores=vectorstores,
-            logger=logger,
-            thread_id=session_id  # ¡Importante pasar el thread_id!
-        )
+        _router_agents[session_id] = get_router_agent(thread_id=session_id)
+        
     router_agent = _router_agents[session_id]
 
 

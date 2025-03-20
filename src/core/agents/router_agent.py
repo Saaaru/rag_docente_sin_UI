@@ -1,18 +1,20 @@
 import datetime
 from typing import Dict, Optional, List, Any
-from utils.conversation import format_and_save_conversation
+from src.utils.conversation import format_and_save_conversation
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
-from utils.rate_limiter import rate_limited_llm_call
+from src.utils.rate_limiter import rate_limited_llm_call
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_chroma import Chroma
 import json
 import logging
+from core.llm import get_llm
 
 # Importar las funciones de creación de los agentes especializados
-from core.agents.planning_agent import create_planning_agent
-from core.agents.evaluation_agent import create_evaluation_agent
-from core.agents.study_guide_agent import create_study_guide_agent
+# YA NO ES NECESARIO IMPORTARLOS AQUÍ
+# from core.agents.planning_agent import create_planning_agent
+# from core.agents.evaluation_agent import create_evaluation_agent
+# from core.agents.study_guide_agent import create_study_guide_agent
 
 _agent_cache = {}  # Diccionario para almacenar las instancias de los agentes
 
@@ -120,121 +122,3 @@ class RouterChatModel(BaseChatModel):
             return ChatResult(generations=[
                 ChatGeneration(message=AIMessage(content=json.dumps(default_response)))
             ])
-
-def create_router_agent(llm, vectorstores: Dict[str, Chroma], logger: logging.Logger, thread_id: str):
-    """
-    Crea un agente router que coordina los agentes especializados (con caché).
-    """
-    global _agent_cache
-
-    if "planning" not in _agent_cache:
-        _agent_cache["planning"] = create_planning_agent(llm, vectorstores)
-    if "evaluation" not in _agent_cache:
-        _agent_cache["evaluation"] = create_evaluation_agent(llm, vectorstores)
-    if "study_guide" not in _agent_cache:
-        _agent_cache["study_guide"] = create_study_guide_agent(llm, vectorstores)
-
-    router_chat = RouterChatModel(llm=llm, logger=logger)
-
-    def router(user_input: str, session_state: Dict[str, Any]) -> str:
-        """
-        Función principal del router.
-        
-        Args:
-            user_input: Consulta del usuario
-            session_state: Estado actual de la sesión
-        """
-        logger.info(f"Procesando consulta: {user_input}")
-
-        try:
-            # Obtener interpretación usando el modelo de chat
-            result = router_chat.invoke([HumanMessage(content=user_input)])
-            interpretation = json.loads(result.content if isinstance(result, AIMessage) else result)
-            
-            logger.debug(f"Interpretación: {interpretation}")
-            
-            # Si no requiere agente especializado, dar respuesta directa
-            if not interpretation["requiere_agente"]:
-                return interpretation["respuesta_directa"]
-
-            # Si es una nueva consulta (no es respuesta), actualizar estado
-            if not interpretation["es_respuesta"]:
-                session_state.clear()
-                session_state.update({
-                    "pending_request": False,
-                    "last_query": user_input,
-                    "asignatura": interpretation["asignatura"],
-                    "nivel": interpretation["nivel"],
-                    "mes": None,
-                    "tipo": interpretation["tipo_contenido"],
-                    "categorias": list(vectorstores.keys())  # Añadir categorías disponibles
-                })
-
-            # Actualizar información del estado si se proporciona
-            if interpretation["asignatura"]:
-                session_state["asignatura"] = interpretation["asignatura"]
-            if interpretation["nivel"]:
-                session_state["nivel"] = interpretation["nivel"]
-
-            # Verificar si necesitamos más información
-            if not session_state.get("asignatura"):
-                session_state["pending_request"] = True
-                return "¿Para qué asignatura necesitas este material?"
-            if not session_state.get("nivel"):
-                session_state["pending_request"] = True
-                return "¿Para qué nivel educativo necesitas este material?"
-
-            # Asegurar que tenemos el mes
-            if not session_state.get("mes"):
-                current_month = datetime.datetime.now().month
-                months = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
-                         "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
-                session_state["mes"] = months[current_month - 1]
-
-            # Seleccionar y llamar al agente apropiado
-            agent_map = {
-                "PLANIFICACION": _agent_cache["planning"],
-                "EVALUACION": _agent_cache["evaluation"],
-                "GUIA": _agent_cache["study_guide"]
-            }
-            
-            selected_agent = agent_map.get(interpretation["tipo_contenido"])
-            if not selected_agent:
-                logger.error(f"Tipo de contenido no válido: {interpretation['tipo_contenido']}")
-                return "Lo siento, no puedo procesar este tipo de solicitud."
-
-            logger.info(f"Ejecutando agente: {interpretation['tipo_contenido']}")
-            
-            response, needs_more_info, updated_state = selected_agent(
-                user_input,
-                session_state["asignatura"],
-                session_state["nivel"],
-                session_state["mes"]
-            )
-
-            # Si el agente necesita más información
-            if needs_more_info:
-                session_state["pending_request"] = True
-                return response
-
-            # Registrar la conversación exitosa
-            format_and_save_conversation(
-                f"{user_input} (Asignatura: {session_state['asignatura']}, "
-                f"Nivel: {session_state['nivel']}, Mes: {session_state['mes']})",
-                response,
-                thread_id
-            )
-
-            # Actualizar el estado con la información del agente
-            if updated_state:
-                session_state.update(updated_state)
-                session_state["pending_request"] = False
-                session_state["last_query"] = ""
-
-            return response
-
-        except Exception as e:
-            logger.error(f"Error en router: {e}")
-            return "Lo siento, hubo un problema al procesar tu solicitud. ¿Podrías reformularla?"
-
-    return router

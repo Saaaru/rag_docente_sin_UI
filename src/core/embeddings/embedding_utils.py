@@ -1,5 +1,5 @@
 from langchain_google_vertexai import VertexAIEmbeddings
-from config.model_config import EMBEDDING_MODEL_NAME
+from src.config.model_config import EMBEDDING_MODEL_NAME
 import os
 import logging
 

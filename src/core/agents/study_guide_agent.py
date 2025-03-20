@@ -1,9 +1,12 @@
 import datetime
 from langchain_core.messages import SystemMessage, HumanMessage
-from utils.rate_limiter import rate_limited_llm_call
-from core.vectorstore.retriever import retrieve_documents, get_context_from_documents
+from src.utils.rate_limiter import rate_limited_llm_call
+from src.core.vectorstore.retriever import retrieve_documents, get_context_from_documents
 from typing import Dict, Optional
 from langchain_chroma import Chroma
+import logging
+
+logger = logging.getLogger(__name__)
 
 def create_study_guide_agent(llm, vectorstores: Dict[str, Chroma]):
     """
@@ -174,7 +177,7 @@ def create_study_guide_agent(llm, vectorstores: Dict[str, Chroma]):
             return response.content, False, {"asignatura": asignatura, "nivel": nivel, "mes": mes}
 
         except Exception as e:
-            print(f"❌ Error en study_guide_agent: {e}")
+            logger.exception(f"Error en study_guide_agent: {e}")
             return ("Ocurrió un error al generar la guía de estudio. Por favor, intenta nuevamente.",
                    False, None)
 

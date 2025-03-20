@@ -1,6 +1,6 @@
 import os
 import time
-from config import CONVERSATION_DIRECTORY
+from src.config import CONVERSATION_DIRECTORY
 
 def format_and_save_conversation(query: str, response: str, thread_id: str, output_dir: str = "conversaciones") -> str:
     """

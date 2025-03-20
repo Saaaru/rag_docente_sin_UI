@@ -1,8 +1,36 @@
-fastapi
-uvicorn[standard]
-jinja2
-langchain
-chromadb
-pydantic
-python-dotenv
-requests
+# Framework web y utilidades
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+jinja2>=3.1.2
+python-dotenv>=1.0.0
+requests>=2.31.0
+ratelimit>=2.2.1
+
+# LangChain y componentes relacionados
+langchain>=0.0.350
+langchain-community>=0.0.10
+langchain-core>=0.1.10
+langchain-google-vertexai>=0.0.1
+langchain-text-splitters>=0.0.1
+langchain-chroma>=0.0.1
+
+# Base de datos vectorial
+chromadb>=0.4.18
+pydantic>=2.5.2
+
+# Procesamiento de documentos
+pypdf>=3.17.1
+tqdm>=4.66.1
+
+# Google Cloud
+google-cloud-aiplatform>=1.36.4
+google-auth>=2.23.4
+google-cloud-core>=2.3.3
+
+# Utilidades
+numpy>=1.24.0
+typing-extensions>=4.8.0
+python-multipart
+
+# Seguridad y Encriptación
+cryptography>=3.1

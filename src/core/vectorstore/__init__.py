@@ -1,11 +1,6 @@
-from .loader import (
-    initialize_vectorstore,
-    load_and_split_documents,
-    split_large_document,
-)
+from .loader import initialize_vectorstore
 from .retriever import (
     retrieve_documents,
-    retrieve_with_filter,
     get_context_from_documents,
     retrieve_by_category,
     retrieve_bases_curriculares,
@@ -16,10 +11,7 @@ from .retriever import (
 
 __all__ = [
     'initialize_vectorstore',
-    'load_and_split_documents',
-    'split_large_document',
     'retrieve_documents',
-    'retrieve_with_filter',
     'get_context_from_documents',
     'retrieve_by_category',
     'retrieve_bases_curriculares',

@@ -1,284 +1,381 @@
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from tqdm import tqdm
 from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain.schema import Document
-from config.paths import RAW_DIR, PERSIST_DIRECTORY
-from core.embeddings import get_embeddings  # Ahora importamos desde aquí
+from src.config.paths import RAW_DIR, PERSIST_DIRECTORY
+from src.core.embeddings import get_embeddings
 from pathlib import Path
+from src.config.model_config import EMBEDDING_MODEL_NAME, LLM_MODEL_NAME
+import logging
+import re
+import unicodedata
+import chromadb
 
-# Constantes ajustadas para mantener más contexto
-MAX_CHUNK_SIZE = 1000  # Tamaño más grande para mantener contexto
-CHUNK_OVERLAP = 200    # Mayor solapamiento para mejor continuidad
-BATCH_SIZE = 5        # Lotes más pequeños para mejor manejo de memoria
-MAX_RETRIES = 3       # Número de intentos para chunks problemáticos
+logger = logging.getLogger(__name__)
+
+# Constantes optimizadas según los límites de Vertex AI
+MAX_EMBEDDING_BATCH = 250000  # Aproximadamente 62,500 palabras para procesar a la vez
+MAX_CHUNK_SIZE = 8000        # Aproximadamente 2,000 palabras por fragmento
+CHUNK_OVERLAP = 800          # Aproximadamente 10% de solapamiento
+BATCH_SIZE = 50              # Procesar más documentos por lote
+MAX_RETRIES = 2              # Reducir los reintentos para agilizar el proceso
+
+# Información del modelo basada en model_config.py
+print(f"📋 Configuración: Usando modelo de embeddings {EMBEDDING_MODEL_NAME}")
+print(f"📋 Configuración: Usando modelo LLM {LLM_MODEL_NAME}")
+
+def get_optimal_chunk_settings() -> Dict[str, int]:
+    """Determina los ajustes óptimos de fragmentación según el modelo."""
+    # Para text-multilingual-embedding-002, ajustar según documentación
+    if EMBEDDING_MODEL_NAME == "text-multilingual-embedding-002":
+        return {
+            "max_chunk_size": 8000,      # ~2000 palabras
+            "chunk_overlap": 800,        # 10% de solapamiento
+            "batch_size": 50             # 50 documentos por lote
+        }
+    # Para modelos textembedding-gecko
+    elif "gecko" in EMBEDDING_MODEL_NAME:
+        return {
+            "max_chunk_size": 3000,      # ~750 palabras
+            "chunk_overlap": 300,        # 10% de solapamiento
+            "batch_size": 25             # Más conservador
+        }
+    # Default para otros modelos
+    else:
+        return {
+            "max_chunk_size": MAX_CHUNK_SIZE,
+            "chunk_overlap": CHUNK_OVERLAP,
+            "batch_size": BATCH_SIZE
+        }
+
+# Obtener configuración óptima
+optimal_settings = get_optimal_chunk_settings()
+MAX_CHUNK_SIZE = optimal_settings["max_chunk_size"]
+CHUNK_OVERLAP = optimal_settings["chunk_overlap"]
+BATCH_SIZE = optimal_settings["batch_size"]
+
+print(f"⚙️ Usando configuración optimizada:")
+print(f"   - Tamaño de fragmento: {MAX_CHUNK_SIZE} caracteres (~{MAX_CHUNK_SIZE//4} tokens)")
+print(f"   - Solapamiento: {CHUNK_OVERLAP} caracteres") 
+print(f"   - Tamaño de lote: {BATCH_SIZE} documentos")
 
 def split_large_document(doc: Document, max_tokens: int = MAX_CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[Document]:
-    """Divide un documento manteniendo la coherencia del contenido."""
+    """Divide un documento en fragmentos más grandes optimizados."""
+    
+    # Usar el texto completo si es suficientemente pequeño
+    if len(doc.page_content) <= max_tokens:
+        # Solo actualizar metadata
+        doc.metadata.update({
+            'is_split': False,
+            'original_source': doc.metadata.get('source', ''),
+        })
+        return [doc]
+    
+    # Para documentos grandes, dividir de manera inteligente
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_tokens,
         chunk_overlap=overlap,
         length_function=len,
-        # Separadores ordenados para mantener la coherencia del contenido
         separators=[
-            "\n\n",     # Primero intenta dividir por párrafos
-            "\n",       # Luego por líneas
-            ". ",       # Luego por oraciones
-            ", ",       # Luego por cláusulas
-            " ",        # Finalmente por palabras si es necesario
+            "\n\n\n",    # Separaciones muy claras
+            "\n\n",      # Párrafos
+            "\n",        # Líneas
+            ". ",        # Oraciones
+            "? ",        # Preguntas
+            "! ",        # Exclamaciones
+            ", ",        # Cláusulas
+            " ",         # Palabras
+            ""           # Caracteres
         ]
     )
     
     try:
         splits = text_splitter.split_documents([doc])
-        # Preservar metadata importante
-        for split in splits:
+        # Actualizar metadata
+        for i, split in enumerate(splits):
             split.metadata.update({
+                'is_split': True,
+                'split_index': i,
+                'total_splits': len(splits),
                 'original_source': doc.metadata.get('source', ''),
-                'chunk_size': max_tokens,
-                'overlap': overlap,
-                'parent_doc': doc.metadata.get('source', '').split('/')[-1]
+                'parent_doc': os.path.basename(doc.metadata.get('source', 'unknown'))
             })
         return splits
     except Exception as e:
         print(f"⚠️ Error al dividir documento {doc.metadata.get('source', 'unknown')}: {e}")
-        # Intento de recuperación con chunks más pequeños solo si es necesario
+        # Si falla, intentamos una división más simple
         try:
-            return text_splitter.split_documents([doc], chunk_size=max_tokens//2)
+            simpler_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=max_tokens // 2,  # Reducir tamaño a la mitad
+                chunk_overlap=overlap // 2,
+                length_function=len,
+            )
+            return simpler_splitter.split_documents([doc])
         except:
-            print(f"❌ No se pudo procesar el documento incluso con chunks más pequeños")
+            print(f"❌ No se pudo procesar el documento {doc.metadata.get('source', 'unknown')}")
             return []
 
-def process_documents_in_batches(docs: List[Document], batch_size: int = BATCH_SIZE) -> List[Document]:
-    """Procesa documentos en lotes con manejo inteligente de errores."""
-    all_splits = []
-    failed_docs = []
+def load_and_split_documents(directory: str) -> List[Document]:
+    """Carga y divide documentos con logging mejorado."""
+    print(f"\n📂 Cargando documentos desde: {directory}")
     
-    for i in range(0, len(docs), batch_size):
-        batch = docs[i:i + batch_size]
-        batch_splits = []
+    # Sanitizar la ruta
+    safe_directory = directory.replace(" ", "_")
+    if safe_directory != directory:
+        try:
+            # Solo intentar renombrar si el directorio destino no existe
+            if not os.path.exists(safe_directory):
+                os.rename(directory, safe_directory)
+                directory = safe_directory
+                print(f"✓ Directorio renombrado: {directory}")
+            else:
+                print(f"⚠️ No se puede renombrar, ya existe: {safe_directory}")
+        except Exception as e:
+            print(f"⚠️ No se pudo renombrar el directorio: {e}")
+    
+    # Configurar el loader
+    loader = DirectoryLoader(
+        path=directory,
+        glob="**/*.pdf",
+        loader_cls=PyPDFLoader,
+        show_progress=True,
+        use_multithreading=True
+    )
+    
+    try:
+        print(f"  🔍 Buscando archivos PDF en {directory}...")
+        docs = loader.load()
+        doc_count = len(docs)
         
-        for doc in tqdm(batch, desc=f"Procesando lote {i//batch_size + 1}/{len(docs)//batch_size + 1}"):
-            retry_count = 0
-            success = False
-            
-            while retry_count < MAX_RETRIES and not success:
-                try:
-                    # Intentar con diferentes tamaños de chunk si es necesario
-                    current_size = MAX_CHUNK_SIZE - (retry_count * 200)
-                    current_overlap = CHUNK_OVERLAP - (retry_count * 50)
-                    
-                    splits = split_large_document(doc, 
-                                               max_tokens=current_size,
-                                               overlap=current_overlap)
-                    
-                    if splits:
-                        batch_splits.extend(splits)
-                        success = True
-                        print(f"  ✓ Documento procesado: {doc.metadata.get('source', 'unknown')}")
-                    else:
-                        raise ValueError("No se generaron splits")
-                        
-                except Exception as e:
-                    retry_count += 1
-                    if retry_count == MAX_RETRIES:
-                        print(f"❌ No se pudo procesar el documento después de {MAX_RETRIES} intentos")
-                        failed_docs.append(doc)
-                    else:
-                        print(f"⚠️ Reintentando con chunks más pequeños... ({retry_count}/{MAX_RETRIES})")
+        if doc_count == 0:
+            print("  ⚠️ No se encontraron documentos PDF")
+            return []
         
-        all_splits.extend(batch_splits)
-        print(f"  ✓ Lote {i//batch_size + 1} completado: {len(batch_splits)} fragmentos")
-    
-    if failed_docs:
-        print(f"\n⚠️ {len(failed_docs)} documentos no pudieron ser procesados:")
-        for doc in failed_docs:
-            print(f"  - {doc.metadata.get('source', 'unknown')}")
-    
-    return all_splits
+        print(f"  ✅ Encontrados {doc_count} documentos PDF")
+        
+        # Ordenar documentos por tamaño (primero los pequeños)
+        docs.sort(key=lambda doc: len(doc.page_content))
+        
+        # Procesar documentos en lotes paralelos
+        all_splits = []
+        counter = {"processed": 0, "failed": 0, "unchanged": 0, "split": 0}
+        
+        for doc in tqdm(docs, desc="Procesando documentos"):
+            try:
+                # Determinar si necesita dividirse o puede procesarse completo
+                doc_len = len(doc.page_content)
+                doc_tokens = doc_len // 4  # Estimación de tokens
+                
+                if doc_tokens <= MAX_CHUNK_SIZE // 4:  # Si cabe en un fragmento
+                    # No dividir, usar documento completo
+                    all_splits.append(doc)
+                    counter["unchanged"] += 1
+                    print(f"  ⏩ Documento pequeño, no requiere división: {os.path.basename(doc.metadata.get('source', 'unknown'))}")
+                else:
+                    # Dividir documento grande
+                    splits = split_large_document(doc)
+                    split_count = len(splits)
+                    
+                    if split_count > 0:
+                        all_splits.extend(splits)
+                        counter["split"] += 1
+                        counter["processed"] += split_count
+                        print(f"  ✂️ Documento dividido en {split_count} fragmentos: {os.path.basename(doc.metadata.get('source', 'unknown'))}")
+                    else:
+                        counter["failed"] += 1
+                
+            except Exception as e:
+                print(f"  ❌ Error procesando: {os.path.basename(doc.metadata.get('source', 'unknown'))}: {e}")
+                counter["failed"] += 1
+        
+        # Resumen
+        total_splits = len(all_splits)
+        print(f"\n📊 Resumen de procesamiento:")
+        print(f"   - Documentos originales: {doc_count}")
+        print(f"   - Documentos sin dividir: {counter['unchanged']}")
+        print(f"   - Documentos divididos: {counter['split']}")
+        print(f"   - Documentos con error: {counter['failed']}")
+        print(f"   - Total fragmentos resultantes: {total_splits}")
+        
+        return all_splits
+        
+    except Exception as e:
+        print(f"❌ Error general al cargar documentos: {str(e)}")
+        return []
 
 def create_collection_in_batches(
     docs: List[Document],
     embeddings,
     collection_name: str,
     persist_directory: str,
-    batch_size: int = BATCH_SIZE
-) -> Chroma:
-    """Crea una colección de Chroma con manejo inteligente de errores."""
+) -> Optional[Chroma]:
+    """Crea una colección de Chroma con manejo de lotes optimizado."""
+    if not docs:
+        print(f"⚠️ No hay documentos para crear la colección '{collection_name}'")
+        return None
+        
+    doc_count = len(docs)
+    print(f"\n🔨 Creando colección '{collection_name}' con {doc_count} documentos")
+    
     try:
-        # Inicializar la colección con un lote pequeño
-        first_batch = docs[:batch_size]
-        db = Chroma.from_documents(
-            documents=first_batch,
-            embedding=embeddings,
+        # Crear colección vacía primero
+        chroma_client = chromadb.PersistentClient(path=persist_directory)
+        db = Chroma(
             collection_name=collection_name,
-            persist_directory=persist_directory
+            embedding_function=embeddings,
+            persist_directory=persist_directory,
+            client=chroma_client
         )
         
-        # Procesar el resto en lotes con reintentos
-        remaining_docs = docs[batch_size:]
-        failed_batches = []
+        # Añadir documentos en lotes
+        batch_size = min(BATCH_SIZE, max(1, doc_count // 10))  # Ajustar batch_size dinámicamente
+        total_batches = (doc_count + batch_size - 1) // batch_size
         
-        for i in range(0, len(remaining_docs), batch_size):
-            batch = remaining_docs[i:i + batch_size]
-            retry_count = 0
-            success = False
+        print(f"  📦 Procesando en {total_batches} lotes de ~{batch_size} documentos cada uno")
+        
+        for i in range(0, doc_count, batch_size):
+            batch = docs[i:i + batch_size]
+            batch_number = (i // batch_size) + 1
             
-            while retry_count < MAX_RETRIES and not success:
-                try:
-                    print(f"  ↳ Añadiendo lote {i//batch_size + 2} a '{collection_name}'")
-                    db.add_documents(documents=batch)
-                    success = True
-                except Exception as e:
-                    retry_count += 1
-                    if retry_count == MAX_RETRIES:
-                        print(f"❌ Fallo al añadir lote después de {MAX_RETRIES} intentos")
-                        failed_batches.append(batch)
-                    else:
-                        print(f"⚠️ Reintentando añadir lote... ({retry_count}/{MAX_RETRIES})")
-                        
-        if failed_batches:
-            print(f"\n⚠️ {len(failed_batches)} lotes no pudieron ser añadidos")
+            try:
+                print(f"  ↳ Añadiendo lote {batch_number}/{total_batches} ({len(batch)} documentos)")
+                db.add_documents(documents=batch)
+                print(f"    ✓ Lote {batch_number} completado")
+            except Exception as e:
+                print(f"    ❌ Error en lote {batch_number}: {str(e)}")
+                # Intentar añadir los documentos uno por uno
+                for j, doc in enumerate(batch):
+                    try:
+                        db.add_documents(documents=[doc])
+                    except:
+                        print(f"      ❌ No se pudo añadir el documento {j+1} del lote {batch_number}")
+        
+        # Verificar el resultado
+        try:
+            final_count = len(db.get()['ids'])
+            print(f"\n✅ Colección '{collection_name}' creada con {final_count} documentos")
+            return db
+        except Exception as e:
+            print(f"⚠️ No se pudo verificar el conteo final: {e}")
+            return db
             
-        return db
     except Exception as e:
-        print(f"  ❌ Error al crear la colección: {e}")
+        print(f"❌ Error al crear la colección: {e}")
         return None
 
-def load_and_split_documents(directory: str, max_tokens: int = 1500, overlap: int = 200) -> List[Document]:
-    """Carga y divide documentos PDF desde un directorio y sus subdirectorios.
-
-    Args:
-        directory: Directorio raíz a explorar (debe ser un string).
-        max_tokens: Tamaño máximo de cada fragmento.
-        overlap: Solapamiento entre fragmentos.
-
-    Returns:
-        Lista de documentos (fragmentos).
-    """
-    loader = DirectoryLoader(
-        path=directory,
-        glob="**/*.pdf",  # Busca PDFs recursivamente
-        loader_cls=PyPDFLoader,
-        show_progress=True,
-        use_multithreading=True
-    )
-    try:
-        docs = loader.load()
-    except Exception as e:
-        print(f"❌ Error al cargar documentos desde {directory}: {e}")
-        return []
-
-    if not docs:
-        print(f"  📂 No se encontraron archivos PDF en {directory}")
-        return []
-
-    print(f"  📄 Documentos cargados: {len(docs)}")
-    all_splits = []
-    for doc in tqdm(docs, desc="Dividiendo documentos"):
-        splits = split_large_document(doc, max_tokens=max_tokens, overlap=overlap)
-        all_splits.extend(splits)
-    print(f"  ✅ Documentos divididos en {len(all_splits)} fragmentos")
-    return all_splits
-
+def sanitize_collection_name(name: str) -> str:
+    """Sanitiza el nombre de la colección."""
+    name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('ASCII')
+    name = re.sub(r'[^a-zA-Z0-9-_]', '_', name)
+    if name[0].isdigit():
+        name = f"col_{name}"
+    return name[:63]
 
 def initialize_vectorstore(persist_directory: str = str(PERSIST_DIRECTORY)) -> Dict[str, Chroma]:
-    """Inicializa el vectorstore, creando o cargando colecciones.
-
-    Busca en subcarpetas de RAW_DIR, y crea una colección por subcarpeta.
-    Si una colección ya existe, la carga; si no, la crea.
-
-    Args:
-        persist_directory: Directorio donde se guardan/cargan las colecciones.
-
-    Returns:
-        Diccionario de colecciones Chroma (nombre_coleccion: Chroma).
     """
-    print("📚 Inicializando vectorstores...")
-
-    # Crear el directorio de persistencia si no existe
-    persist_dir_path = Path(persist_directory)
-    persist_dir_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"✅ Directorio de persistencia verificado/creado: {persist_dir_path.parent}")
+    Inicializa vectorstores para cada subdirectorio en RAW_DIR, *solo si no existen*.
+    """
+    logger.info("Inicializando vectorstores...")
 
     embeddings = get_embeddings()
-    if embeddings is None:
-        print(f"❌ Error: No se pudieron obtener los embeddings.")
+    if not embeddings:
+        logger.error("No se pudieron obtener los embeddings")
         return {}
 
     vectorstores = {}
-    raw_dir_str = str(RAW_DIR)
+    raw_dir = Path(RAW_DIR)
 
-    # Verificar que RAW_DIR exista y tenga subdirectorios
-    if not os.path.exists(raw_dir_str):
-        print(f"❌ Error: El directorio {raw_dir_str} no existe.")
+    if not raw_dir.exists():
+        logger.error(f"No existe el directorio {raw_dir}")
         return {}
 
-    subdirs = [d for d in os.listdir(raw_dir_str) 
-              if os.path.isdir(os.path.join(raw_dir_str, d))]
-    
-    if not subdirs:
-        print(f"❌ Error: No se encontraron subdirectorios en {raw_dir_str}")
-        return {}
+    # 1. Usar el cliente de Chroma para obtener las colecciones existentes
+    try:
+        chroma_client = chromadb.PersistentClient(path=persist_directory)
+        existing_collections = chroma_client.list_collections()
+        existing_collection_names = [col.name for col in existing_collections]
+        logger.info(f"Colecciones existentes: {existing_collection_names}")
+    except Exception as e:
+        logger.error(f"Error al listar colecciones existentes: {e}. Se asumirá que no hay ninguna.")
+        existing_collection_names = []
 
-    print(f"📁 Procesando {len(subdirs)} subdirectorios...")
 
-    # Iterar sobre las subcarpetas de RAW_DIR
-    for subdir_name in os.listdir(raw_dir_str):
-        subdir_path = os.path.join(raw_dir_str, subdir_name)
-        if os.path.isdir(subdir_path):  # Solo procesar subdirectorios
-            collection_name = subdir_name  # El nombre de la subcarpeta es el nombre de la colección
+    for subdir in raw_dir.iterdir():
+        if not subdir.is_dir():
+            continue
 
-            # --- Corrección: Sanitizar el nombre de la colección ---
-            collection_name = collection_name.replace(" ", "_")  # Reemplaza espacios con guiones bajos
-            collection_name = ''.join(c for c in collection_name if c.isalnum() or c == '_' or c == '-') #Elimina caracteres no permitidos
-            if not (3 <= len(collection_name) <= 63):
-                print(f"⚠️ Advertencia: Nombre de colección inválido después de sanitizar: '{collection_name}'.  Saltando.")
+        original_name = subdir.name
+        collection_name = sanitize_collection_name(original_name)
+
+        # 2. Verificar si la colección ya existe (usando la lista obtenida)
+        if collection_name in existing_collection_names:
+            logger.info(f"Colección '{collection_name}' ya existe. Cargando...")
+            try:
+                # Cargar la colección existente *usando langchain_chroma*
+                vectorstore = Chroma(
+                    collection_name=collection_name,
+                    embedding_function=embeddings,
+                    persist_directory=persist_directory,
+                    client=chroma_client
+                )
+                vectorstores[collection_name] = vectorstore
+                logger.info(f"Colección '{collection_name}' cargada.")
+            except Exception as e:
+                logger.error(f"Error al cargar la colección '{collection_name}': {e}")
+            continue  # Saltar al siguiente subdirectorio
+
+        if collection_name != original_name:
+            logger.info(f"Nombre sanitizado: '{original_name}' -> '{collection_name}'")
+
+        logger.info(f"Procesando colección: {collection_name}")
+
+        try:
+            loader = DirectoryLoader(
+                str(subdir), glob="**/*.pdf", loader_cls=PyPDFLoader, show_progress=True, use_multithreading=True
+            )
+            documents = loader.load()
+            if not documents:
+                logger.warning(f"No se encontraron documentos en {subdir}")
                 continue
-            if collection_name[0].isdigit() or collection_name[-1].isdigit(): #Asegura que no empiece ni termine con numeros
-                print(f"⚠️ Advertencia: Nombre de colección inválido, empieza o termina con un número: '{collection_name}'.  Saltando.")
-                continue
-            # --- Fin de la corrección ---
 
-            collection_path = os.path.join(persist_directory, collection_name)
+            # Usar la función de división
+            split_docs = load_and_split_documents(str(subdir))
 
-            if os.path.exists(collection_path) and os.listdir(collection_path):
-                print(f"  📂 Cargando colección existente '{collection_name}'...")
+            logger.info(f"Documentos divididos en {len(split_docs)} fragmentos")
+
+            for doc in split_docs:
+                if 'source' in doc.metadata:
+                    doc.metadata['source'] = sanitize_collection_name(doc.metadata['source'])
+                doc.metadata['collection'] = collection_name
+
+            # 3. Crear vectorstore *solo* si no existe (usando langchain_chroma)
+            vectorstore = Chroma(
+                collection_name=collection_name,
+                embedding_function=embeddings,
+                persist_directory=persist_directory,
+                client=chroma_client
+            )
+
+            # 4. Procesamiento por lotes (solo si es una colección nueva)
+            MAX_BATCH_SIZE = 5000
+            num_batches = (len(split_docs) + MAX_BATCH_SIZE - 1) // MAX_BATCH_SIZE
+            logger.info(f"Añadiendo {len(split_docs)} documentos en {num_batches} lotes...")
+
+            for i in range(0, len(split_docs), MAX_BATCH_SIZE):
+                batch = split_docs[i:i + MAX_BATCH_SIZE]
                 try:
-                    vectorstore = Chroma(
-                        collection_name=collection_name,
-                        embedding_function=embeddings,
-                        persist_directory=persist_directory
-                    )
-                    vectorstores[collection_name] = vectorstore
-                    print(f"  ✅ Colección '{collection_name}' cargada.")
+                    vectorstore.add_documents(batch)  # Usar add_documents de langchain_chroma
+                    logger.info(f"Lote {i // MAX_BATCH_SIZE + 1}/{num_batches} añadido.")
                 except Exception as e:
-                    print(f"  ❌ Error al cargar la colección '{collection_name}': {e}")
-                    # Podrías agregar una opción para recrear la colección aquí si falla la carga.
-                    continue  # Saltar a la siguiente
+                    logger.error(f"Error en lote {i // MAX_BATCH_SIZE + 1}: {e}")
 
-            else:
-                print(f"  📄 Creando colección '{collection_name}'...")
-                docs = load_and_split_documents(subdir_path)
-                if not docs:
-                    print(f"   ⏩ Saltando creación de: '{collection_name}' (no hay documentos).")
-                    continue
+            vectorstores[collection_name] = vectorstore
 
-                try:
-                    db = Chroma.from_documents(
-                        documents=docs,
-                        embedding=embeddings,
-                        collection_name=collection_name,
-                        persist_directory=persist_directory
-                    )
-                    vectorstores[collection_name] = db
-                    print(f"  ✅ Colección '{collection_name}' creada.")
-                except Exception as e:
-                    print(f"  ❌ Error al crear la colección '{collection_name}': {e}")
-                    continue  # Saltar a la siguiente
+        except Exception as e:
+            logger.error(f"Error procesando {collection_name}: {e}")
+            continue
 
-    if not vectorstores:
-        print("\n⚠️ No se pudo cargar ni crear ninguna colección.")
     return vectorstores

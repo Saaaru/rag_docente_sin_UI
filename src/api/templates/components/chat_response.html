@@ -1,0 +1,15 @@
+<div class="message-container {{ 'user-message' if agent_response.get('role') == 'user' else 'bot-message' }}">
+    <div class="message-bubble">
+        {% if agent_response.get('role') == 'user' %}
+            <i class="fas fa-user message-icon"></i>
+        {% else %}
+            <i class="fas fa-robot message-icon"></i>
+        {% endif %}
+        <p>{{ agent_response['message'] }}</p>
+    </div>
+    {% if agent_response.get('sources') %}
+        <div class="message-sources">
+            <small>Fuentes: {{ ', '.join(agent_response['sources']) }}</small>
+        </div>
+    {% endif %}
+</div> 
