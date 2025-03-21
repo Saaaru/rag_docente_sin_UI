@@ -6,16 +6,16 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import vertexai
-from src.core.vectorstore.loader import initialize_vectorstore  # <-- AHORA CON src.
-from src.config.paths import (  # <-- AHORA CON src.
+from src.core.vectorstore.loader import initialize_vectorstore  # <-- IMPORTACIÓN ACTUALIZADA
+from src.config.paths import (  
         RAW_DIR,
         PERSIST_DIRECTORY,
         SRC_DIR,
         CREDENTIALS_DIR
     )
-from src.core.llm import get_llm  # <-- AHORA CON src.
-from src.core.router import get_router_agent, RouterAgent, reset_router_agent  # <-- AHORA CON src.
-from src.api.routes import chat as chat_router  # <-- AHORA CON src.
+from src.core.llm import get_llm  
+from src.core.router import get_router_agent, RouterAgent, reset_router_agent  
+from src.api.routes import chat as chat_router  
 
 # Configuración de directorios
 TEMPLATES_DIR = SRC_DIR / "api" / "templates"
