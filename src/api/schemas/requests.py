@@ -19,3 +19,11 @@ class EvaluationRequest(BaseRequest):
 class StudyGuideRequest(BaseRequest):
     """Solicitud para guías de estudio"""
     pass
+
+class ChatRequest(BaseModel):
+    user_message: str
+    thread_id: str
+
+class ChatResponse(BaseModel):
+    message: str
+    sources: list[str] = []

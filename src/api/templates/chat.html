@@ -27,7 +27,14 @@
     </div>
 
     <script>
-        const threadId = "{{ thread_id }}";  // Pasamos el thread_id desde el backend
+        // Debug: Verificar que thread_id se establece correctamente
+        const threadId = "{{ thread_id }}";
+        console.log('Thread ID establecido:', threadId);
+        
+        // Verificación adicional
+        if (!threadId) {
+            console.error('¡Advertencia! thread_id no está definido');
+        }
     </script>
     <script src="/static/script.js"></script>
 </body>

@@ -4,13 +4,20 @@ document.addEventListener("DOMContentLoaded", () => {
     const chatHistory = document.getElementById("chat-history");
     const resetButton = document.getElementById("reset-button"); // Botón de reinicio
 
+    // Función para obtener cookies
     function getCookie(name) {
         const value = `; ${document.cookie}`;
         const parts = value.split(`; ${name}=`);
         if (parts.length === 2) return parts.pop().split(';').shift();
     }
 
-    const threadId = getCookie("thread_id"); // Obtenemos el thread_id de la cookie
+    // Obtener thread_id de la cookie o de la variable global
+    const threadId = getCookie("thread_id");
+    console.log("Thread ID obtenido:", threadId);
+    
+    if (!threadId) {
+        console.error("¡Advertencia! thread_id no está definido");
+    }
 
     // Función para agregar mensajes al historial
     function addMessageToChat(message, role, sources) {
@@ -46,23 +53,34 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // Función para enviar mensajes al backend
-    function sendMessage(message) {
+    const sendMessage = async (message) => {
         if (!message.trim()) return;
 
-        addMessageToChat(message, "user"); // Mostrar mensaje del usuario
+        addMessageToChat(message, "user");
 
-        fetch("/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: `user_message=${encodeURIComponent(message)}&session_id=${encodeURIComponent(threadId)}`,
-        })
-        .then((response) => {
+        const formData = new FormData();
+        formData.append('user_message', message);
+        formData.append('thread_id', threadId);
+        
+        try {
+            const response = await fetch('/api/chat', {
+                method: 'POST',
+                body: formData
+            });
+
             if (!response.ok) {
+                // Debug: Mostrar más detalles del error
+                const errorText = await response.text();
+                console.error('Error Response:', {
+                    status: response.status,
+                    statusText: response.statusText,
+                    body: errorText
+                });
                 throw new Error(`HTTP error! Status: ${response.status}`);
             }
-            return response.text();
-        })
-        .then((html) => {
+
+            const html = await response.text();
+
             // Insertar la respuesta HTML *directamente*
             const tempDiv = document.createElement('div');
             tempDiv.innerHTML = html;
@@ -74,16 +92,15 @@ document.addEventListener("DOMContentLoaded", () => {
             const sources = sourcesText ? sourcesText.replace('Fuentes: ', '').split(', ') : [];
 
             if (messageText) {
-                addMessageToChat(messageText, "bot", sources); // Mostrar respuesta del bot
+                addMessageToChat(messageText, "bot", sources);
             }
-        })
-        .catch((error) => {
-            console.error("Error:", error);
+        } catch (error) {
+            console.error('Error:', error);
             addMessageToChat("Hubo un error al procesar tu pregunta.", "bot");
-        });
+        }
 
-        userInput.value = ""; // Limpiar input
-    }
+        userInput.value = "";
+    };
 
     // Event listeners
     sendButton.addEventListener("click", () => sendMessage(userInput.value));
@@ -96,18 +113,42 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Botón de reinicio
     resetButton.addEventListener("click", () => {
-        fetch("/reset", {
+        const formData = new FormData();
+        formData.append('thread_id', threadId);
+
+        fetch("/api/reset", {
             method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: `session_id=${encodeURIComponent(threadId)}`,
+            body: formData
         })
         .then((response) => response.json())
         .then((data) => {
             if (data.message === "Conversación reiniciada") {
-                chatHistory.innerHTML = ""; // Limpiar el historial
+                chatHistory.innerHTML = "";
                 addMessageToChat("¡Conversación reiniciada!", "bot");
             }
         })
         .catch((error) => console.error("Error:", error));
     });
+
+    // Añadir esta función de prueba
+    async function testEndpoint() {
+        const formData = new FormData();
+        formData.append('user_message', 'test message');
+        formData.append('thread_id', threadId);
+
+        try {
+            const response = await fetch('/debug-chat', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await response.json();
+            console.log('Debug response:', data);
+        } catch (error) {
+            console.error('Debug error:', error);
+        }
+    }
+
+    // Llamar a esta función cuando se cargue la página
+    console.log('Testing endpoint...');
+    testEndpoint();
 });
